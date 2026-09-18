@@ -15,6 +15,8 @@ const MINUTE = 60 * 1000;
 // Source: https://developers.cloudflare.com/workflows/build/rules-of-workflows/
 const PROOF_STEP_TIMEOUT_MS = 25 * MINUTE;
 const PROOF_COMMAND_TIMEOUT_MS = 20 * MINUTE;
+const DEPS_STEP_TIMEOUT_MS = 10 * MINUTE;
+const DEPS_COMMAND_TIMEOUT_MS = 8 * MINUTE;
 const MIGRATE_STEP_TIMEOUT_MS = 10 * MINUTE;
 const MIGRATE_COMMAND_TIMEOUT_MS = 3 * MINUTE;
 const DEPLOY_STEP_TIMEOUT_MS = 30 * MINUTE;
@@ -27,7 +29,13 @@ const DEPLOY_COMMAND_TIMEOUT_MS = 25 * MINUTE;
 // triggers RPCTransportError / internal Workflow failures.
 const npmrcCommand =
   '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
-  'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc';
+  'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +
+  // Keep the pnpm store inside /workspace: node_modules is pruned before every
+  // snapshot, but the store survives, so later installs relink instead of
+  // re-downloading the whole dependency graph.
+  'printf "store-dir=/workspace/.pnpm-store\\n" >> ~/.npmrc';
+
+const installCommand = "pnpm install --frozen-lockfile";
 
 const cleanupCommand =
   'find . -type d \\( -name node_modules -o -name dist -o -name .cache -o -name .wrangler \\) -prune -exec rm -rf {} + 2>/dev/null';
@@ -54,11 +62,33 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
 
     const proofCommand =
       `${npmrcCommand} && ` +
-      `pnpm install --frozen-lockfile && ` +
+      `${installCommand} && ` +
       `${config.proofCommand} && ` +
       cleanupCommand;
 
-    const proofResult = await ci.runner({
+    // Dependency install isolated as its own step so the snapshot cache can
+    // reuse it: key is the lockfile/workspace manifests, so an unchanged
+    // dependency set skips the step entirely (no container spawn) and hands
+    // downstream steps a workspace whose .pnpm-store already covers install.
+    const depsResult = await ci.runner({
+      name: "deps",
+      command:
+        `${npmrcCommand} && ` +
+        `${installCommand} && ` +
+        `pnpm store prune && ` +
+        cleanupCommand,
+      secrets: ["NPM_TOKEN"],
+      env: config.installEnv,
+      cache: {
+        inputs: ["pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc"],
+      },
+      config: {
+        timeout: DEPS_STEP_TIMEOUT_MS,
+        commandTimeoutMs: DEPS_COMMAND_TIMEOUT_MS,
+      },
+    });
+
+    const proofResult = await depsResult.runner({
       name: "proof",
       command: proofCommand,
       secrets: ["NPM_TOKEN"],
@@ -81,7 +111,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
 
         const previewCommand =
           `${npmrcCommand} && ` +
-          `pnpm install --frozen-lockfile && ` +
+          `${installCommand} && ` +
           `${config.buildCommand} && ` +
           `${config.previewCommand} && ` +
           cleanupCommand;
@@ -108,6 +138,9 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     if (config.d1Database) {
       const migrateResult = await proofResult.runner({
         name: "migrate",
+        // Runs a single wrangler CLI call — no install or build — so it goes
+        // on the quarter-vCPU lite pool instead of the standard sandbox.
+        sandbox: "SANDBOX_LITE",
         command: `wrangler d1 migrations apply ${config.d1Database} --env production --remote`,
         cwd: config.d1MigrationsCwd,
         cloudflareCredentials: {
@@ -124,7 +157,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
 
     const deployCommand =
       `${npmrcCommand} && ` +
-      `pnpm install --frozen-lockfile && ` +
+      `${installCommand} && ` +
       `${config.buildCommand} && ` +
       `${config.deployCommand} && ` +
       cleanupCommand;

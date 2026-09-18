@@ -1,0 +1,91 @@
+diff --git a/src/ci/capabilities.ts b/src/ci/capabilities.ts
+index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..8188197d604f152280072291b4c888260c9e57cb 100644
+--- a/src/ci/capabilities.ts
++++ b/src/ci/capabilities.ts
+@@ -157,6 +157,7 @@ async function executeStep(
+     label: input.label,
+     command: input.command,
+     cwd: input.cwd,
++    sandbox: input.sandbox,
+     timeoutMs: input.commandTimeoutMs,
+     source: prepared.checkout,
+     ttlSeconds: input.snapshotTtlSeconds ?? DEFAULT_SNAPSHOT_TTL_SECONDS,
+diff --git a/src/ci/runners/runner.ts b/src/ci/runners/runner.ts
+index aa6068d5ab399caf3f018e5c7c4a691da57931a7..b55a25f36bb3a5f22f272497a5f987cae9586947 100644
+--- a/src/ci/runners/runner.ts
++++ b/src/ci/runners/runner.ts
+@@ -8,6 +8,9 @@ export type RunStepInput = {
+   command: string;
+   cwd?: string;
+   timeoutMs?: number;
++  // Durable Object binding on the worker env that hosts the sandbox class.
++  // Defaults to SANDBOX so single-tier workers need no change.
++  sandbox?: string;
+   source: SourceControlCheckout;
+   extraEnv?: Record<string, string>;
+   // Snapshot TTL in seconds. Omitted falls back to the sandbox default (3 days).
+diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..9b89bc30ffcca4ed2d240e56803aa79055b3466c 100644
+--- a/src/ci/runners/sandbox.ts
++++ b/src/ci/runners/sandbox.ts
+@@ -39,11 +39,17 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+     input: RunStepInput & { restore?: DirectoryBackup }
+   ): Promise<RunStepResult<DirectoryBackup>> {
+     // create the sandbox handle
+-    const sandbox = getSandbox(this.env.SANDBOX, createRunnerId(input.label), {
+-      transport: 'rpc',
+-      enableDefaultSession: false,
+-      containerTimeouts: { portReadyTimeoutMS: PORT_READY_TIMEOUT_MS },
+-    });
++    const sandbox = getSandbox(
++      (
++        this.env as unknown as Record<string, Bindings['SANDBOX']>
++      )[input.sandbox ?? 'SANDBOX'],
++      createRunnerId(input.label),
++      {
++        transport: 'rpc',
++        enableDefaultSession: false,
++        containerTimeouts: { portReadyTimeoutMS: PORT_READY_TIMEOUT_MS },
++      }
++    );
+ 
+     let cleanupTransferredToStreams = false;
+     try {
+diff --git a/src/pipeline/ci-workflow.ts b/src/pipeline/ci-workflow.ts
+index a0ac164d44c2caace0a209652d181b013a2138e9..d897b16e7692c6546a5687a8bbfdba269999a9e8 100644
+--- a/src/pipeline/ci-workflow.ts
++++ b/src/pipeline/ci-workflow.ts
+@@ -153,6 +153,7 @@ export abstract class CIWorkflow<
+               command: options.command,
+               cwd: options.cwd,
+               commandTimeoutMs: config.commandTimeoutMs,
++              sandbox: options.sandbox,
+               snapshot: inherited,
+               snapshotTtlSeconds: config.snapshotTtlSeconds,
+               cloudflareCredentials: options.cloudflareCredentials,
+diff --git a/src/pipeline/types.ts b/src/pipeline/types.ts
+index a1f5ff3aa8c30350300f3bd8d1f25cbc850aff65..b0271962edc40a14558024273669f52ed888730b 100644
+--- a/src/pipeline/types.ts
++++ b/src/pipeline/types.ts
+@@ -120,6 +120,10 @@ export type CiRunStepInput = {
+   attempt?: number;
+   snapshot?: DirectoryBackup;
+   snapshotTtlSeconds?: number;
++  // Durable Object binding name on the Worker env used to host this step's
++  // sandbox. Defaults to SANDBOX; lets a worker declare multiple container
++  // classes (e.g. a small instance for light steps).
++  sandbox?: string;
+   // Inject the Cloudflare deployment account and API token into the command
+   // env. Scoped per step so build/test/lint commands never see them.
+   cloudflareCredentials?: boolean | { accountId: string };
+@@ -160,6 +164,10 @@ export type RunnerOptions = {
+   // node_modules/) onto a fresh checkout instead of reusing a full workspace.
+   cache?: { inputs: string[] };
+   config?: RunnerConfig;
++  // Name of the Durable Object binding that hosts this step's sandbox.
++  // Defaults to SANDBOX. Bind another container class in wrangler config to
++  // run this step on a different instance type.
++  sandbox?: string;
+   cloudflareCredentials?: boolean | { accountId: string };
+   // Inject provider-specific source-control credentials into the command env.
+   sourceControlCredentials?: boolean;

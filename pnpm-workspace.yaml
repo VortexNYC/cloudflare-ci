@@ -4,3 +4,5 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - miniflare@5.20260915.0-alpha
   - wrangler@4.132.0
+patchedDependencies:
+  '@cloudflare/ci': patches/@cloudflare__ci.patch

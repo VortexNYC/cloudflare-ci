@@ -3,6 +3,10 @@ import { CiSandbox } from "@cloudflare/ci/worker";
 import { CI } from "./ci";
 import type { Bindings } from "./env";
 
+// Same sandbox runtime on a smaller container instance_type, bound as
+// SANDBOX_LITE for steps that don't need a full build machine.
+export class CiSandboxLite extends CiSandbox {}
+
 export { CiSandbox, CI };
 
 const TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;

@@ -16,7 +16,15 @@
       "class_name": "CiSandbox",
       "image": "./Dockerfile",
       "max_instances": 10,
-      "instance_type": "standard-4"
+      "instance_type": "standard-2"
+    },
+    {
+      // Light pool for steps that don't install dependencies (e.g. D1
+      // migrations): a quarter vCPU / 1 GiB is plenty for a wrangler CLI call.
+      "class_name": "CiSandboxLite",
+      "image": "./Dockerfile",
+      "max_instances": 10,
+      "instance_type": "basic"
     }
   ],
   "durable_objects": {
@@ -24,6 +32,10 @@
       {
         "name": "SANDBOX",
         "class_name": "CiSandbox"
+      },
+      {
+        "name": "SANDBOX_LITE",
+        "class_name": "CiSandboxLite"
       }
     ]
   },
@@ -52,6 +64,10 @@
   ],
   "exports": {
     "CiSandbox": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "CiSandboxLite": {
       "type": "durable-object",
       "storage": "sqlite"
     }
