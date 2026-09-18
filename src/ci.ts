@@ -29,13 +29,14 @@ const DEPLOY_COMMAND_TIMEOUT_MS = 25 * MINUTE;
 // triggers RPCTransportError / internal Workflow failures.
 const npmrcCommand =
   '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
-  'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +
-  // Keep the pnpm store inside /workspace: node_modules is pruned before every
-  // snapshot, but the store survives, so later installs relink instead of
-  // re-downloading the whole dependency graph.
-  'printf "store-dir=/workspace/.pnpm-store\\n" >> ~/.npmrc';
+  'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc';
 
-const installCommand = "pnpm install --frozen-lockfile";
+// pnpm does not honor store-dir in the user-level ~/.npmrc, so it goes on the
+// command line. Keeping the store inside /workspace means it survives the
+// cleanup + snapshot while node_modules is pruned: later installs on a
+// restored workspace relink instead of re-downloading the dependency graph.
+const installCommand =
+  "pnpm install --frozen-lockfile --store-dir /workspace/.pnpm-store";
 
 const cleanupCommand =
   'find . -type d \\( -name node_modules -o -name dist -o -name .cache -o -name .wrangler \\) -prune -exec rm -rf {} + 2>/dev/null';
@@ -72,11 +73,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     // downstream steps a workspace whose .pnpm-store already covers install.
     const depsResult = await ci.runner({
       name: "deps",
-      command:
-        `${npmrcCommand} && ` +
-        `${installCommand} && ` +
-        `pnpm store prune && ` +
-        cleanupCommand,
+      command: `${npmrcCommand} && ${installCommand} && ` + cleanupCommand,
       secrets: ["NPM_TOKEN"],
       env: config.installEnv,
       cache: {
