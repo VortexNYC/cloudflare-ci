@@ -1,4 +1,5 @@
 import { CiSandbox } from "@cloudflare/ci/worker";
+import { getSandbox } from "@cloudflare/sandbox";
 
 import { CI } from "./ci";
 import type { Bindings } from "./env";
@@ -77,11 +78,44 @@ async function handleAdmin(request: Request, env: Bindings): Promise<Response> {
   });
 }
 
+// Escape hatch for sandboxes whose step wedged before destroy() ran — a dead
+// exec stream or abandoned log stream leaves the container billing forever.
+async function handleSandboxKill(
+  request: Request,
+  env: Bindings
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers.get("authorization")?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as { name?: string };
+  const name = body.name;
+  if (!name || !/^[a-z0-9-]+$/.test(name)) {
+    return Response.json({ error: "invalid sandbox name" }, { status: 400 });
+  }
+
+  const results: Record<string, string> = {};
+  for (const binding of ["SANDBOX", "SANDBOX_LITE"] as const) {
+    try {
+      await getSandbox(env[binding], name).destroy();
+      results[binding] = "destroyed";
+    } catch (error) {
+      results[binding] = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return Response.json(results);
+}
+
 export default {
   fetch(request: Request, env: Bindings) {
     const { pathname } = new URL(request.url);
     if (pathname === "/admin/artifacts" && request.method === "POST") {
       return handleAdmin(request, env);
+    }
+    if (pathname === "/admin/sandbox/kill" && request.method === "POST") {
+      return handleSandboxKill(request, env);
     }
     return new Response("vortex-ci", { status: 200 });
   },

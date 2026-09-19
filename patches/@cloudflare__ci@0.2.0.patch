@@ -25,10 +25,25 @@ index aa6068d5ab399caf3f018e5c7c4a691da57931a7..b55a25f36bb3a5f22f272497a5f987ca
    extraEnv?: Record<string, string>;
    // Snapshot TTL in seconds. Omitted falls back to the sandbox default (3 days).
 diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
-index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..9b89bc30ffcca4ed2d240e56803aa79055b3466c 100644
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..5f591b01740be0babb61b8919b273e8a4c2c4df3 100644
 --- a/src/ci/runners/sandbox.ts
 +++ b/src/ci/runners/sandbox.ts
-@@ -39,11 +39,17 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -19,6 +19,14 @@ const STDERR_FILE = '/tmp/ci-step.err';
+ const COMMAND_TIMEOUT_MS = 11 * 60 * 1000;
+ const SOURCE_TIMEOUT_MS = 5 * 60 * 1000;
+ const PORT_READY_TIMEOUT_MS = 60_000;
++// waitForExit only arms its own timeout after the log stream connects; if
++// stream acquisition hangs (wedged container server), the step — and the
++// billed container — would run forever without this grace.
++const EXIT_WATCHDOG_GRACE_MS = 60_000;
++// Large logs are streamed back from the container, so cleanup is deferred to
++// stream drain — but if the caller abandons them (terminated workflow, dead
++// RPC), nothing would ever destroy the sandbox. Bound the drain window.
++const STREAM_DRAIN_DEADLINE_MS = 5 * 60 * 1000;
+ // Keep notification and failure previews bounded by slicing each stream to its
+ // tail in the sandbox, where command failures usually surface.
+ const TAIL_BYTES = 28_000;
+@@ -39,11 +47,17 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
      input: RunStepInput & { restore?: DirectoryBackup }
    ): Promise<RunStepResult<DirectoryBackup>> {
      // create the sandbox handle
@@ -51,6 +66,48 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..9b89bc30ffcca4ed2d240e56803aa790
  
      let cleanupTransferredToStreams = false;
      try {
+@@ -86,9 +100,23 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+           autoCleanup: false,
+         }
+       );
+-      const { exitCode } = await proc.waitForExit(
+-        input.timeoutMs ?? COMMAND_TIMEOUT_MS
+-      );
++      const commandTimeoutMs = input.timeoutMs ?? COMMAND_TIMEOUT_MS;
++      let watchdog: ReturnType<typeof setTimeout> | undefined;
++      const { exitCode } = await Promise.race([
++        proc.waitForExit(commandTimeoutMs),
++        new Promise<never>((_, reject) => {
++          watchdog = setTimeout(
++            () =>
++              reject(
++                new Error(
++                  `Command "${input.label}" produced no exit within ` +
++                    `${commandTimeoutMs}ms; sandbox stream may be dead`
++                )
++              ),
++            commandTimeoutMs + EXIT_WATCHDOG_GRACE_MS
++          );
++        }),
++      ]).finally(() => clearTimeout(watchdog));
+       const preview = await readPreviews(sandbox);
+ 
+       if (exitCode !== 0) {
+@@ -204,9 +232,14 @@ function withCleanup(
+ ) {
+   const reader = stream.getReader();
+   let released = false;
++  const deadline = setTimeout(
++    () => void releaseOnce(),
++    STREAM_DRAIN_DEADLINE_MS
++  );
+   const releaseOnce = async () => {
+     if (!released) {
+       released = true;
++      clearTimeout(deadline);
+       await release();
+     }
+   };
 diff --git a/src/pipeline/ci-workflow.ts b/src/pipeline/ci-workflow.ts
 index a0ac164d44c2caace0a209652d181b013a2138e9..d897b16e7692c6546a5687a8bbfdba269999a9e8 100644
 --- a/src/pipeline/ci-workflow.ts
