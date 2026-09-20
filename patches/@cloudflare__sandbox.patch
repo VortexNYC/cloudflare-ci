@@ -1,0 +1,74 @@
+diff --git a/dist/sandbox-DKG3H156.js b/dist/sandbox-DKG3H156.js
+index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..5d273eafda36b9f9712acdf300d94a263752bb74 100644
+--- a/dist/sandbox-DKG3H156.js
++++ b/dist/sandbox-DKG3H156.js
+@@ -3514,25 +3514,33 @@ async function* responseToAsyncIterable(response, signal) {
+ function asyncIterableToSSEStream(events, options) {
+ 	const encoder = new TextEncoder();
+ 	const serialize = options?.serialize || JSON.stringify;
++	const iterator = events[Symbol.asyncIterator]();
++	let done = false;
+ 	return new ReadableStream({
+-		async start(controller) {
++		async pull(controller) {
+ 			try {
+-				for await (const event of events) {
+-					if (options?.signal?.aborted) {
+-						controller.error(/* @__PURE__ */ new Error("Operation was aborted"));
+-						break;
+-					}
+-					const sseEvent = `data: ${serialize(event)}\n\n`;
+-					controller.enqueue(encoder.encode(sseEvent));
++				if (done) {
++					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
++					controller.close();
++					return;
+ 				}
+-				controller.enqueue(encoder.encode("data: [DONE]\n\n"));
++				const { done: iterDone, value } = await iterator.next();
++				if (iterDone || options?.signal?.aborted) {
++					if (options?.signal?.aborted && !iterDone) await iterator.return?.();
++					done = true;
++					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
++					controller.close();
++					return;
++				}
++				controller.enqueue(encoder.encode(`data: ${serialize(value)}\n\n`));
+ 			} catch (error) {
+ 				controller.error(error);
+-			} finally {
+-				controller.close();
+ 			}
+ 		},
+-		cancel() {}
++		async cancel() {
++			done = true;
++			await iterator.return?.();
++		}
+ 	});
+ }
+ 
+@@ -9568,10 +9576,20 @@ var Sandbox = class Sandbox extends Container {
+ 			const r2Key = `${BACKUP_STORAGE_PREFIX}/${backupId}/${BACKUP_ARCHIVE_OBJECT_NAME}`;
+ 			const metaKey = `${BACKUP_STORAGE_PREFIX}/${backupId}/${BACKUP_METADATA_OBJECT_NAME}`;
+ 			const archiveStream = await this.client.files.readFileStream(archivePath, backupSession);
+-			const sseDecoded = new ReadableStream({ async start(controller) {
++			const sseIterator = streamFile(archiveStream)[Symbol.asyncIterator]();
++			const sseDecoded = new ReadableStream({ async pull(controller) {
+ 				try {
+-					for await (const chunk of streamFile(archiveStream)) if (chunk instanceof Uint8Array) controller.enqueue(chunk);
+-					controller.close();
++					for (;;) {
++						const { done, value } = await sseIterator.next();
++						if (done) {
++							controller.close();
++							return;
++						}
++						if (value instanceof Uint8Array) {
++							controller.enqueue(value);
++							return;
++						}
++					}
+ 				} catch (err) {
+ 					controller.error(err);
+ 				}

@@ -6,3 +6,4 @@ minimumReleaseAgeExclude:
   - wrangler@4.132.0
 patchedDependencies:
   '@cloudflare/ci@0.2.0': patches/@cloudflare__ci@0.2.0.patch
+  '@cloudflare/sandbox': patches/@cloudflare__sandbox.patch

@@ -6,6 +6,7 @@ settings:
 
 patchedDependencies:
   '@cloudflare/ci@0.2.0': 2611dfe8c9b67f8cf72132f91f0676f232fa59f9ebae003ea504365e5ce1c269
+  '@cloudflare/sandbox': 6d77143f91baf088789a865121514adb68b7556cb08f9370755da2b5f0953286
 
 importers:
 
@@ -16,7 +17,7 @@ importers:
         version: 0.2.0(patch_hash=2611dfe8c9b67f8cf72132f91f0676f232fa59f9ebae003ea504365e5ce1c269)
       '@cloudflare/sandbox':
         specifier: 0.12.1
-        version: 0.12.1
+        version: 0.12.1(patch_hash=6d77143f91baf088789a865121514adb68b7556cb08f9370755da2b5f0953286)
       zod:
         specifier: ^3.25.0
         version: 3.25.76
@@ -577,7 +578,7 @@ snapshots:
 
   '@cloudflare/ci@0.2.0(patch_hash=2611dfe8c9b67f8cf72132f91f0676f232fa59f9ebae003ea504365e5ce1c269)':
     dependencies:
-      '@cloudflare/sandbox': 0.12.1
+      '@cloudflare/sandbox': 0.12.1(patch_hash=6d77143f91baf088789a865121514adb68b7556cb08f9370755da2b5f0953286)
       zod: 4.6.5
     transitivePeerDependencies:
       - '@openai/agents'
@@ -588,7 +589,7 @@ snapshots:
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
 
-  '@cloudflare/sandbox@0.12.1':
+  '@cloudflare/sandbox@0.12.1(patch_hash=6d77143f91baf088789a865121514adb68b7556cb08f9370755da2b5f0953286)':
     dependencies:
       '@cloudflare/containers': 0.3.7
       aws4fetch: 1.0.20
