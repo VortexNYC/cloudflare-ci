@@ -16,8 +16,8 @@ const MINUTE = 60 * 1000;
 // Step timeouts must cover command + the end-of-step snapshot upload, which
 // streams ~1GB through the sandbox DO. Terminal steps set persist: false and
 // skip that upload, so their step timeout is just the command plus margin.
-const PROOF_STEP_TIMEOUT_MS = 30 * MINUTE;
-const PROOF_COMMAND_TIMEOUT_MS = 25 * MINUTE;
+const BUILD_STEP_TIMEOUT_MS = 30 * MINUTE;
+const BUILD_COMMAND_TIMEOUT_MS = 25 * MINUTE;
 const DEPS_STEP_TIMEOUT_MS = 15 * MINUTE;
 const DEPS_COMMAND_TIMEOUT_MS = 10 * MINUTE;
 const MIGRATE_STEP_TIMEOUT_MS = 10 * MINUTE;
@@ -50,13 +50,13 @@ const relinkCommand = `${installCommand} --config.trustLockfile=true`;
 // node_modules is pruned (relinked from the in-workspace store on restore);
 // dist is KEPT so preview/deploy never rebuild — they just wrangler-upload.
 // Deps keeps .pnpm-store in its snapshot (that's what downstream installs
-// relink from); proof drops it too — its snapshot exists only to carry dist
+// relink from); build drops it too — its snapshot exists only to carry dist
 // to terminal steps, which cold-install on the lite pool. An ~850MB store in
 // the archive OOMs the DO isolate when a lite-tier container drains the
 // restore stream too slowly.
 const cleanupCommand =
   'find . -type d \\( -name node_modules -o -name .cache -o -name .wrangler \\) -prune -exec rm -rf {} + 2>/dev/null';
-const proofCleanupCommand =
+const buildCleanupCommand =
   'find . -type d \\( -name node_modules -o -name .cache -o -name .wrangler -o -name .pnpm-store \\) -prune -exec rm -rf {} + 2>/dev/null';
 
 export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
@@ -79,11 +79,11 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       ...config.buildEnv,
     };
 
-    const proofCommand =
+    const buildOnlyCommand =
       `${npmrcCommand} && ` +
       `${relinkCommand} && ` +
-      `${config.proofCommand} && ` +
-      proofCleanupCommand;
+      `${config.buildCommand} && ` +
+      buildCleanupCommand;
 
     // Dependency install isolated as its own step so the snapshot cache can
     // reuse it: key is the lockfile/workspace manifests, so an unchanged
@@ -103,40 +103,20 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       },
     });
 
-    // proof (build+check, snapshot carries dist/ downstream) and test run
-    // concurrently off the deps snapshot — two standard-2 containers instead
-    // of one step that must fit build+check+test inside the 30min ceiling.
-    const proofPromise = depsResult.runner({
-      name: "proof",
-      command: proofCommand,
+    // CI exists to produce and ship deployable artifacts — everything that
+    // can gate locally (check/test via pre-push hooks) stays out of billable
+    // containers. build is the only persisted step: its snapshot carries
+    // dist/ to preview/deploy.
+    const buildResult = await depsResult.runner({
+      name: "build",
+      command: buildOnlyCommand,
       secrets: ["NPM_TOKEN"],
       env: baseEnv,
       config: {
-        timeout: PROOF_STEP_TIMEOUT_MS,
-        commandTimeoutMs: PROOF_COMMAND_TIMEOUT_MS,
+        timeout: BUILD_STEP_TIMEOUT_MS,
+        commandTimeoutMs: BUILD_COMMAND_TIMEOUT_MS,
       },
     });
-
-    const testPromise = config.testCommand
-      ? depsResult.runner({
-          name: "test",
-          command:
-            `${npmrcCommand} && ` +
-            `${relinkCommand} && ` +
-            `${config.testCommand}`,
-          secrets: ["NPM_TOKEN"],
-          persist: false,
-          env: baseEnv,
-          config: {
-            timeout: PROOF_STEP_TIMEOUT_MS,
-            commandTimeoutMs: PROOF_COMMAND_TIMEOUT_MS,
-          },
-        })
-      : undefined;
-
-    const [proofResult] = await Promise.all(
-      [proofPromise, testPromise].filter((p) => p !== undefined)
-    );
 
     if (branch !== "main") {
       if (config.previewCommand) {
@@ -148,7 +128,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           .slice(0, 40);
         const previewEnv = { ...baseEnv, CI_PREVIEW_ALIAS: previewAlias };
 
-        // dist/ rides proof's snapshot, so preview is upload-only — install
+        // dist/ rides build's snapshot, so preview is upload-only — install
         // (esbuild resolves from node_modules) + wrangler versions upload.
         // Network-bound: quarter-vCPU lite pool is plenty.
         const previewCommand =
@@ -156,7 +136,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           `${relinkCommand} && ` +
           `${config.previewCommand}`;
 
-        await proofResult.runner({
+        await buildResult.runner({
           name: "preview",
           command: previewCommand,
           secrets: ["NPM_TOKEN"],
@@ -176,12 +156,12 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     }
 
     if (config.d1Database) {
-      await proofResult.runner({
+      await buildResult.runner({
         name: "migrate",
         // Runs a single wrangler CLI call — no install or build — so it goes
         // on the quarter-vCPU lite pool instead of the standard sandbox. It
         // only mutates remote D1, not /workspace, so persist: false and deploy
-        // chains off proof's snapshot rather than migrate's.
+        // chains off build's snapshot rather than migrate's.
         sandbox: "SANDBOX_LITE",
         persist: false,
         command: `wrangler d1 migrations apply ${config.d1Database} --env production --remote`,
@@ -197,14 +177,14 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       });
     }
 
-    // Same shape as preview: proof's snapshot already carries dist/, so
+    // Same shape as preview: build's snapshot already carries dist/, so
     // deploy is install + wrangler deploy only.
     const deployCommand =
       `${npmrcCommand} && ` +
       `${relinkCommand} && ` +
       `${config.deployCommand}`;
 
-    await proofResult.runner({
+    await buildResult.runner({
       name: "deploy",
       command: deployCommand,
       secrets: ["NPM_TOKEN"],
