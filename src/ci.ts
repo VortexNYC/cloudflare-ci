@@ -41,8 +41,10 @@ const npmrcCommand =
 const installCommand =
   "pnpm install --frozen-lockfile --store-dir /workspace/.pnpm-store";
 
+// node_modules is pruned (relinked from the in-workspace store on restore);
+// dist is KEPT so preview/deploy never rebuild — they just wrangler-upload.
 const cleanupCommand =
-  'find . -type d \\( -name node_modules -o -name dist -o -name .cache -o -name .wrangler \\) -prune -exec rm -rf {} + 2>/dev/null';
+  'find . -type d \\( -name node_modules -o -name .cache -o -name .wrangler \\) -prune -exec rm -rf {} + 2>/dev/null';
 
 export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
   protected async pipeline(
@@ -109,17 +111,19 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           .slice(0, 40);
         const previewEnv = { ...baseEnv, CI_PREVIEW_ALIAS: previewAlias };
 
+        // dist/ rides proof's snapshot, so preview is upload-only — install
+        // (esbuild resolves from node_modules) + wrangler versions upload.
+        // Network-bound: quarter-vCPU lite pool is plenty.
         const previewCommand =
           `${npmrcCommand} && ` +
           `${installCommand} && ` +
-          `${config.buildCommand} && ` +
-          `${config.previewCommand} && ` +
-          cleanupCommand;
+          `${config.previewCommand}`;
 
         await proofResult.runner({
           name: "preview",
           command: previewCommand,
           secrets: ["NPM_TOKEN"],
+          sandbox: "SANDBOX_LITE",
           persist: false,
           cloudflareCredentials: {
             accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
@@ -156,12 +160,12 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       });
     }
 
+    // Same shape as preview: proof's snapshot already carries dist/, so
+    // deploy is install + wrangler deploy only.
     const deployCommand =
       `${npmrcCommand} && ` +
       `${installCommand} && ` +
-      `${config.buildCommand} && ` +
-      `${config.deployCommand} && ` +
-      cleanupCommand;
+      `${config.deployCommand}`;
 
     await proofResult.runner({
       name: "deploy",
