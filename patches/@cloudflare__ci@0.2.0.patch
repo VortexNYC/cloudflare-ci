@@ -1,3 +1,18 @@
+diff --git a/src/ci/cache.ts b/src/ci/cache.ts
+index 433f19c0e750f2957e1c08e9c41600f90b234296..70861ebdf8f16d3258d38446f8b8d5cf461239e9 100644
+--- a/src/ci/cache.ts
++++ b/src/ci/cache.ts
+@@ -173,7 +173,9 @@ export async function lookupSnapshotCache(
+   }
+   return {
+     status: 'hit',
+-    snapshot: { id: pointer.backupId, dir: pointer.dir },
++    // Restores go through the worker's R2 binding (localBucket); without the
++    // flag the sandbox demands presigned-URL R2 credentials we don't set.
++    snapshot: { id: pointer.backupId, dir: pointer.dir, localBucket: true },
+     cachePointer: { key: input.key, ...metadata },
+   };
+ }
 diff --git a/src/ci/capabilities.ts b/src/ci/capabilities.ts
 index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..1d53a1ad4cd181ceace6dea468a91508df7f9fd3 100644
 --- a/src/ci/capabilities.ts
