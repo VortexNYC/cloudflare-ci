@@ -69,12 +69,18 @@ index aa6068d5ab399caf3f018e5c7c4a691da57931a7..f784bba540051d44c7478af0bc14bfa9
    extraEnv?: Record<string, string>;
    // Snapshot TTL in seconds. Omitted falls back to the sandbox default (3 days).
 diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
-index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..7c7014c46cace3785beb5ad944152ef0ae4e9b5b 100644
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..942fed28cebc8f28e18e5004544e96bbd1bd4d2f 100644
 --- a/src/ci/runners/sandbox.ts
 +++ b/src/ci/runners/sandbox.ts
-@@ -19,6 +19,14 @@ const STDERR_FILE = '/tmp/ci-step.err';
+@@ -17,8 +17,19 @@ const WORKSPACE_DIR = '/workspace';
+ const STDOUT_FILE = '/tmp/ci-step.out';
+ const STDERR_FILE = '/tmp/ci-step.err';
  const COMMAND_TIMEOUT_MS = 11 * 60 * 1000;
- const SOURCE_TIMEOUT_MS = 5 * 60 * 1000;
+-const SOURCE_TIMEOUT_MS = 5 * 60 * 1000;
++// Overlay checkout after a restore re-fetches the repo over the network —
++// on a slow registry/git day 5m is not enough, and a source timeout kills
++// the whole attempt (new container, full restore) instead of just waiting.
++const SOURCE_TIMEOUT_MS = 15 * 60 * 1000;
  const PORT_READY_TIMEOUT_MS = 60_000;
 +// waitForExit only arms its own timeout after the log stream connects; if
 +// stream acquisition hangs (wedged container server), the step — and the
@@ -87,7 +93,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..7c7014c46cace3785beb5ad944152ef0
  // Keep notification and failure previews bounded by slicing each stream to its
  // tail in the sandbox, where command failures usually surface.
  const TAIL_BYTES = 28_000;
-@@ -39,19 +47,25 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -39,21 +50,32 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
      input: RunStepInput & { restore?: DirectoryBackup }
    ): Promise<RunStepResult<DirectoryBackup>> {
      // create the sandbox handle
@@ -120,16 +126,39 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..7c7014c46cace3785beb5ad944152ef0
 +      // makes the pipeline depend on a credential pair it doesn't otherwise
 +      // need; RPC streams those archives instead, at some throughput cost.
 +      const localBucket = true;
++      const phaseStart = Date.now();
++      const phase = (label: string) => {
++        console.log(`[ci:${input.label}] ${label} (+${Math.round((Date.now() - phaseStart) / 1000)}s)`);
++      };
        if (input.restore) {
          await sandbox.restoreBackup(input.restore);
++        phase('restore done');
          // Overlay (no rm) so cached node_modules survive while tracked source
-@@ -86,22 +100,39 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+         // files are refreshed to this commit. The restored archive may carry a
+         // different commit's source (e.g. a reused install cache), so this is
+@@ -67,12 +89,14 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+             env: checkoutSourceEnv(input.source),
+           }
+         );
++        phase('checkout done');
+       } else {
+         await sandbox.exec(checkoutSourceScript(input.source, WORKSPACE_DIR), {
+           cwd: '/',
+           timeout: SOURCE_TIMEOUT_MS,
+           env: checkoutSourceEnv(input.source),
+         });
++        phase('checkout done');
+       }
+ 
+       const proc = await sandbox.startProcess(
+@@ -86,22 +110,40 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
            autoCleanup: false,
          }
        );
 -      const { exitCode } = await proc.waitForExit(
 -        input.timeoutMs ?? COMMAND_TIMEOUT_MS
 -      );
++      phase('command starting');
 +      const commandTimeoutMs = input.timeoutMs ?? COMMAND_TIMEOUT_MS;
 +      let watchdog: ReturnType<typeof setTimeout> | undefined;
 +      const { exitCode } = await Promise.race([
@@ -173,7 +202,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..7c7014c46cace3785beb5ad944152ef0
        const rawLogs = await readLogs(sandbox);
        const streams = [rawLogs.stdout, rawLogs.stderr].filter(
          (value): value is ReadableStream<Uint8Array> =>
-@@ -204,9 +235,14 @@ function withCleanup(
+@@ -204,9 +246,14 @@ function withCleanup(
  ) {
    const reader = stream.getReader();
    let released = false;
