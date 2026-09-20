@@ -33,6 +33,8 @@ const repoConfigs: Record<string, RepoConfig> = {
     installEnv: {
       HOME: "/tmp",
       CI: "true",
+      // prepare runs `vp config` on install — no hooks in ephemeral containers.
+      VP_GIT_HOOKS: "0",
     },
     buildCommand,
     deployCommand:
@@ -58,6 +60,7 @@ const repoConfigs: Record<string, RepoConfig> = {
     installEnv: {
       HOME: "/tmp",
       CI: "true",
+      VP_GIT_HOOKS: "0",
     },
     // typecheck here is a build-input gate for deploy, not a test — vitest
     // runs in the pre-push hook locally.
