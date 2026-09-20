@@ -41,6 +41,12 @@ const npmrcCommand =
 const installCommand =
   "pnpm install --frozen-lockfile --store-dir /workspace/.pnpm-store";
 
+// pnpm>=12 re-verifies every lockfile entry against the registry on install
+// (~2.3k packument fetches for seal — minutes of registry stalls per step).
+// deps runs the real verification; every downstream install re-checks the
+// identical lockfile, so relink with trustLockfile instead.
+const relinkCommand = `${installCommand} --config.trustLockfile=true`;
+
 // node_modules is pruned (relinked from the in-workspace store on restore);
 // dist is KEPT so preview/deploy never rebuild — they just wrangler-upload.
 // Deps keeps .pnpm-store in its snapshot (that's what downstream installs
@@ -75,7 +81,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
 
     const proofCommand =
       `${npmrcCommand} && ` +
-      `${installCommand} && ` +
+      `${relinkCommand} && ` +
       `${config.proofCommand} && ` +
       proofCleanupCommand;
 
@@ -116,7 +122,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           name: "test",
           command:
             `${npmrcCommand} && ` +
-            `${installCommand} && ` +
+            `${relinkCommand} && ` +
             `${config.testCommand}`,
           secrets: ["NPM_TOKEN"],
           persist: false,
@@ -147,7 +153,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         // Network-bound: quarter-vCPU lite pool is plenty.
         const previewCommand =
           `${npmrcCommand} && ` +
-          `${installCommand} && ` +
+          `${relinkCommand} && ` +
           `${config.previewCommand}`;
 
         await proofResult.runner({
@@ -195,7 +201,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     // deploy is install + wrangler deploy only.
     const deployCommand =
       `${npmrcCommand} && ` +
-      `${installCommand} && ` +
+      `${relinkCommand} && ` +
       `${config.deployCommand}`;
 
     await proofResult.runner({
