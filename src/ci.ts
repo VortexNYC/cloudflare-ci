@@ -13,13 +13,16 @@ const MINUTE = 60 * 1000;
 // Workflow steps must stay within Cloudflare's 30-minute ceiling and still
 // leave the sandbox time to snapshot /workspace before the step timeout fires.
 // Source: https://developers.cloudflare.com/workflows/build/rules-of-workflows/
-const PROOF_STEP_TIMEOUT_MS = 25 * MINUTE;
-const PROOF_COMMAND_TIMEOUT_MS = 20 * MINUTE;
-const DEPS_STEP_TIMEOUT_MS = 10 * MINUTE;
-const DEPS_COMMAND_TIMEOUT_MS = 8 * MINUTE;
+// Step timeouts must cover command + the end-of-step snapshot upload, which
+// streams ~1GB through the sandbox DO. Terminal steps set persist: false and
+// skip that upload, so their step timeout is just the command plus margin.
+const PROOF_STEP_TIMEOUT_MS = 30 * MINUTE;
+const PROOF_COMMAND_TIMEOUT_MS = 25 * MINUTE;
+const DEPS_STEP_TIMEOUT_MS = 15 * MINUTE;
+const DEPS_COMMAND_TIMEOUT_MS = 10 * MINUTE;
 const MIGRATE_STEP_TIMEOUT_MS = 10 * MINUTE;
 const MIGRATE_COMMAND_TIMEOUT_MS = 3 * MINUTE;
-const DEPLOY_STEP_TIMEOUT_MS = 30 * MINUTE;
+const DEPLOY_STEP_TIMEOUT_MS = 28 * MINUTE;
 const DEPLOY_COMMAND_TIMEOUT_MS = 25 * MINUTE;
 
 // The sandbox runs every command as a wrapped subshell, so we only need the
@@ -117,6 +120,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           name: "preview",
           command: previewCommand,
           secrets: ["NPM_TOKEN"],
+          persist: false,
           cloudflareCredentials: {
             accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
           },
@@ -130,14 +134,15 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       return;
     }
 
-    let deployInput = proofResult;
-
     if (config.d1Database) {
-      const migrateResult = await proofResult.runner({
+      await proofResult.runner({
         name: "migrate",
         // Runs a single wrangler CLI call — no install or build — so it goes
-        // on the quarter-vCPU lite pool instead of the standard sandbox.
+        // on the quarter-vCPU lite pool instead of the standard sandbox. It
+        // only mutates remote D1, not /workspace, so persist: false and deploy
+        // chains off proof's snapshot rather than migrate's.
         sandbox: "SANDBOX_LITE",
+        persist: false,
         command: `wrangler d1 migrations apply ${config.d1Database} --env production --remote`,
         cwd: config.d1MigrationsCwd,
         cloudflareCredentials: {
@@ -149,7 +154,6 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           commandTimeoutMs: MIGRATE_COMMAND_TIMEOUT_MS,
         },
       });
-      deployInput = migrateResult;
     }
 
     const deployCommand =
@@ -159,10 +163,11 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       `${config.deployCommand} && ` +
       cleanupCommand;
 
-    await deployInput.runner({
+    await proofResult.runner({
       name: "deploy",
       command: deployCommand,
       secrets: ["NPM_TOKEN"],
+      persist: false,
       cloudflareCredentials: {
         accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
       },

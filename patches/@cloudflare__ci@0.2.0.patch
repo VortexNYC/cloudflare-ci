@@ -1,5 +1,5 @@
 diff --git a/src/ci/capabilities.ts b/src/ci/capabilities.ts
-index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..8188197d604f152280072291b4c888260c9e57cb 100644
+index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..1d53a1ad4cd181ceace6dea468a91508df7f9fd3 100644
 --- a/src/ci/capabilities.ts
 +++ b/src/ci/capabilities.ts
 @@ -157,6 +157,7 @@ async function executeStep(
@@ -10,22 +10,43 @@ index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..8188197d604f152280072291b4c88826
      timeoutMs: input.commandTimeoutMs,
      source: prepared.checkout,
      ttlSeconds: input.snapshotTtlSeconds ?? DEFAULT_SNAPSHOT_TTL_SECONDS,
+@@ -187,7 +188,7 @@ async function executeStep(
+     return execution;
+   }
+ 
+-  const result = await runner.run({ ...runInput, restore: input.snapshot });
++  const result = await runner.run({ ...runInput, restore: input.snapshot, persist: input.persist });
+   return {
+     exitCode: result.exitCode,
+     logs: result.logs,
+@@ -210,7 +211,7 @@ async function finalizeStep(
+   prepared: PreparedStep,
+   execution: CompletedStepExecution
+ ): Promise<CompletedStepExecution> {
+-  if (!prepared.cacheKey || execution.cachePointer) {
++  if (!prepared.cacheKey || execution.cachePointer || !execution.snapshot) {
+     return execution;
+   }
+   // Write the small JSON pointer at the deterministic cache key. It records the
 diff --git a/src/ci/runners/runner.ts b/src/ci/runners/runner.ts
-index aa6068d5ab399caf3f018e5c7c4a691da57931a7..b55a25f36bb3a5f22f272497a5f987cae9586947 100644
+index aa6068d5ab399caf3f018e5c7c4a691da57931a7..f784bba540051d44c7478af0bc14bfa9cdfeb150 100644
 --- a/src/ci/runners/runner.ts
 +++ b/src/ci/runners/runner.ts
-@@ -8,6 +8,9 @@ export type RunStepInput = {
+@@ -8,6 +8,12 @@ export type RunStepInput = {
    command: string;
    cwd?: string;
    timeoutMs?: number;
 +  // Durable Object binding on the worker env that hosts the sandbox class.
 +  // Defaults to SANDBOX so single-tier workers need no change.
 +  sandbox?: string;
++  // Set false for terminal steps nobody chains off (preview, deploy): skips
++  // the end-of-step /workspace snapshot upload entirely.
++  persist?: boolean;
    source: SourceControlCheckout;
    extraEnv?: Record<string, string>;
    // Snapshot TTL in seconds. Omitted falls back to the sandbox default (3 days).
 diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
-index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..cfdd08991a0fc68c6537f28d4e7b9174a1a6b824 100644
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..7c7014c46cace3785beb5ad944152ef0ae4e9b5b 100644
 --- a/src/ci/runners/sandbox.ts
 +++ b/src/ci/runners/sandbox.ts
 @@ -19,6 +19,14 @@ const STDERR_FILE = '/tmp/ci-step.err';
@@ -79,7 +100,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..cfdd08991a0fc68c6537f28d4e7b9174
        if (input.restore) {
          await sandbox.restoreBackup(input.restore);
          // Overlay (no rm) so cached node_modules survive while tracked source
-@@ -86,9 +100,23 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -86,22 +100,39 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
            autoCleanup: false,
          }
        );
@@ -106,7 +127,30 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..cfdd08991a0fc68c6537f28d4e7b9174
        const preview = await readPreviews(sandbox);
  
        if (exitCode !== 0) {
-@@ -204,9 +232,14 @@ function withCleanup(
+         return { exitCode, logs: preview, preview };
+       }
+ 
+-      const snapshot = await sandbox.createBackup({
+-        dir: WORKSPACE_DIR,
+-        name: input.label,
+-        multipart: true,
+-        ttl: input.ttlSeconds,
+-        localBucket,
+-      });
++      const snapshot =
++        input.persist === false
++          ? undefined
++          : await sandbox.createBackup({
++              dir: WORKSPACE_DIR,
++              name: input.label,
++              multipart: true,
++              ttl: input.ttlSeconds,
++              localBucket,
++            });
+       const rawLogs = await readLogs(sandbox);
+       const streams = [rawLogs.stdout, rawLogs.stderr].filter(
+         (value): value is ReadableStream<Uint8Array> =>
+@@ -204,9 +235,14 @@ function withCleanup(
  ) {
    const reader = stream.getReader();
    let released = false;
@@ -121,23 +165,51 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..cfdd08991a0fc68c6537f28d4e7b9174
        await release();
      }
    };
+diff --git a/src/ci/step-notification.ts b/src/ci/step-notification.ts
+index 2d70c69e664aa3083fec8346bd51ca2d41101cdc..191e9cb121bfc6ef7ec6f9c098ea0238944d216c 100644
+--- a/src/ci/step-notification.ts
++++ b/src/ci/step-notification.ts
+@@ -13,17 +13,16 @@ export type StepExecution = {
+   exitCode: number;
+   logs: CiRunnerLogs;
+   preview: { stdout: string; stderr: string };
+-  // The restorable workspace backup (always produced on success), kept separate
+-  // from the cache pointer below: `snapshot` is the thing you restore,
+-  // `cachePointer` is only bookkeeping for the deterministic cache indirection.
++  // The restorable workspace backup (produced on success unless the runner set
++  // `persist: false`), kept separate from the cache pointer below: `snapshot`
++  // is the thing you restore, `cachePointer` is only bookkeeping for the
++  // deterministic cache indirection.
+   snapshot?: DirectoryBackup;
+   cachePointer?: CacheSnapshotPointer;
+   cacheHit: boolean;
+ };
+ 
+-export type CompletedStepExecution = StepExecution & {
+-  snapshot: DirectoryBackup;
+-};
++export type CompletedStepExecution = StepExecution;
+ 
+ /**
+  * Runs and finalizes a runner, then reports success or failure.
 diff --git a/src/pipeline/ci-workflow.ts b/src/pipeline/ci-workflow.ts
-index a0ac164d44c2caace0a209652d181b013a2138e9..d897b16e7692c6546a5687a8bbfdba269999a9e8 100644
+index a0ac164d44c2caace0a209652d181b013a2138e9..737040f333037ffa9c8e27554cef6f50017409e1 100644
 --- a/src/pipeline/ci-workflow.ts
 +++ b/src/pipeline/ci-workflow.ts
-@@ -153,6 +153,7 @@ export abstract class CIWorkflow<
+@@ -153,6 +153,8 @@ export abstract class CIWorkflow<
                command: options.command,
                cwd: options.cwd,
                commandTimeoutMs: config.commandTimeoutMs,
 +              sandbox: options.sandbox,
++              persist: options.persist,
                snapshot: inherited,
                snapshotTtlSeconds: config.snapshotTtlSeconds,
                cloudflareCredentials: options.cloudflareCredentials,
 diff --git a/src/pipeline/types.ts b/src/pipeline/types.ts
-index a1f5ff3aa8c30350300f3bd8d1f25cbc850aff65..b0271962edc40a14558024273669f52ed888730b 100644
+index a1f5ff3aa8c30350300f3bd8d1f25cbc850aff65..45a25b88517ae625e6e3c354bf9c6515abcfb513 100644
 --- a/src/pipeline/types.ts
 +++ b/src/pipeline/types.ts
-@@ -120,6 +120,10 @@ export type CiRunStepInput = {
+@@ -120,6 +120,12 @@ export type CiRunStepInput = {
    attempt?: number;
    snapshot?: DirectoryBackup;
    snapshotTtlSeconds?: number;
@@ -145,10 +217,23 @@ index a1f5ff3aa8c30350300f3bd8d1f25cbc850aff65..b0271962edc40a14558024273669f52e
 +  // sandbox. Defaults to SANDBOX; lets a worker declare multiple container
 +  // classes (e.g. a small instance for light steps).
 +  sandbox?: string;
++  // Set false to skip the end-of-step workspace snapshot (terminal steps).
++  persist?: boolean;
    // Inject the Cloudflare deployment account and API token into the command
    // env. Scoped per step so build/test/lint commands never see them.
    cloudflareCredentials?: boolean | { accountId: string };
-@@ -160,6 +164,10 @@ export type RunnerOptions = {
+@@ -141,8 +147,8 @@ export type CiRunStepOutput = {
+   // The workspace backup the sandbox writes after every successful runner. The
+   // sandbox SDK stores it under a randomly generated id, so this handle is the
+   // only way to find it again; the next chained runner restores from it.
+-  // Always present.
+-  snapshot: DirectoryBackup;
++  // Always present unless the runner set `persist: false` (terminal steps).
++  snapshot?: DirectoryBackup;
+   // Metadata for the deterministic cache pointer, present only when the runner
+   // opted into caching. The pointer is a second-order indirection: a small R2
+   // object at a content-addressed key that records `snapshot`'s random id, so a
+@@ -160,6 +166,13 @@ export type RunnerOptions = {
    // node_modules/) onto a fresh checkout instead of reusing a full workspace.
    cache?: { inputs: string[] };
    config?: RunnerConfig;
@@ -156,6 +241,9 @@ index a1f5ff3aa8c30350300f3bd8d1f25cbc850aff65..b0271962edc40a14558024273669f52e
 +  // Defaults to SANDBOX. Bind another container class in wrangler config to
 +  // run this step on a different instance type.
 +  sandbox?: string;
++  // Set false to skip the end-of-step workspace snapshot for terminal steps
++  // nobody chains off (preview, deploy) — saves the archive upload entirely.
++  persist?: boolean;
    cloudflareCredentials?: boolean | { accountId: string };
    // Inject provider-specific source-control credentials into the command env.
    sourceControlCredentials?: boolean;

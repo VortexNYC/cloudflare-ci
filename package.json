@@ -7,7 +7,6 @@
     "deploy": "wrangler deploy",
     "typecheck": "wrangler types --path ./src/worker-configuration.d.ts && tsc --noEmit",
     "types": "wrangler types --path ./src/worker-configuration.d.ts",
-    "setup:r2-secrets": "node scripts/set-r2-secrets.mjs",
     "logs": "node scripts/get-logs.mjs"
   },
   "dependencies": {
