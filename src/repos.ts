@@ -6,6 +6,9 @@ const repoConfigSchema = z.object({
   installEnv: z.record(z.string()).default({}),
   buildCommand: z.string(),
   proofCommand: z.string(),
+  // Runs concurrently with proof off the deps snapshot (persist: false —
+  // nothing chains off it). Omit to fold tests into proofCommand instead.
+  testCommand: z.string().optional(),
   deployCommand: z.string(),
   previewCommand: z.string().optional(),
   d1Database: z.string().optional(),
@@ -33,7 +36,8 @@ const repoConfigs: Record<string, RepoConfig> = {
       CI: "true",
     },
     buildCommand,
-    proofCommand: `${buildCommand} && pnpm exec vp check && pnpm test`,
+    proofCommand: `${buildCommand} && pnpm exec vp check`,
+    testCommand: "pnpm test",
     deployCommand:
       "(cd apps/anydoc-worker && pnpm exec wrangler deploy -e production) && " +
       "(cd apps/convert-worker && pnpm exec wrangler deploy -e production) && " +
@@ -61,8 +65,8 @@ const repoConfigs: Record<string, RepoConfig> = {
     buildCommand: "pnpm exec vp run typecheck",
     // contract:check needs git; GitHub ci.yml owns it. knip is GitHub-only,
     // same split as seal.
-    proofCommand:
-      "pnpm exec vp run typecheck && pnpm exec vp check && pnpm test",
+    proofCommand: "pnpm exec vp run typecheck && pnpm exec vp check",
+    testCommand: "pnpm test",
     deployCommand: "pnpm exec wrangler deploy -e production",
     d1Database: "issuetracker-global",
     d1MigrationsCwd: ".",

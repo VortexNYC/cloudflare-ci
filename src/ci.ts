@@ -90,7 +90,10 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       },
     });
 
-    const proofResult = await depsResult.runner({
+    // proof (build+check, snapshot carries dist/ downstream) and test run
+    // concurrently off the deps snapshot — two standard-2 containers instead
+    // of one step that must fit build+check+test inside the 30min ceiling.
+    const proofPromise = depsResult.runner({
       name: "proof",
       command: proofCommand,
       secrets: ["NPM_TOKEN"],
@@ -100,6 +103,27 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         commandTimeoutMs: PROOF_COMMAND_TIMEOUT_MS,
       },
     });
+
+    const testPromise = config.testCommand
+      ? depsResult.runner({
+          name: "test",
+          command:
+            `${npmrcCommand} && ` +
+            `${installCommand} && ` +
+            `${config.testCommand}`,
+          secrets: ["NPM_TOKEN"],
+          persist: false,
+          env: baseEnv,
+          config: {
+            timeout: PROOF_STEP_TIMEOUT_MS,
+            commandTimeoutMs: PROOF_COMMAND_TIMEOUT_MS,
+          },
+        })
+      : undefined;
+
+    const [proofResult] = await Promise.all(
+      [proofPromise, testPromise].filter((p) => p !== undefined)
+    );
 
     if (branch !== "main") {
       if (config.previewCommand) {
