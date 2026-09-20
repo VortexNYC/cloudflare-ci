@@ -14,10 +14,18 @@ index 433f19c0e750f2957e1c08e9c41600f90b234296..70861ebdf8f16d3258d38446f8b8d5cf
    };
  }
 diff --git a/src/ci/capabilities.ts b/src/ci/capabilities.ts
-index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..1d53a1ad4cd181ceace6dea468a91508df7f9fd3 100644
+index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..c51b88b755eb89a392beb5e4b046401313dfe4d0 100644
 --- a/src/ci/capabilities.ts
 +++ b/src/ci/capabilities.ts
-@@ -157,6 +157,7 @@ async function executeStep(
+@@ -78,6 +78,7 @@ export async function runCiStep<
+       label: input.label,
+       command: input.command,
+       sensitiveValues: Object.values(prepared.extraEnv),
++      persist: input.persist,
+     },
+     () => executeStep(env, input, prepared),
+     (execution) => finalizeStep(env, input, prepared, execution)
+@@ -157,6 +158,7 @@ async function executeStep(
      label: input.label,
      command: input.command,
      cwd: input.cwd,
@@ -25,7 +33,7 @@ index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..1d53a1ad4cd181ceace6dea468a91508
      timeoutMs: input.commandTimeoutMs,
      source: prepared.checkout,
      ttlSeconds: input.snapshotTtlSeconds ?? DEFAULT_SNAPSHOT_TTL_SECONDS,
-@@ -187,7 +188,7 @@ async function executeStep(
+@@ -187,7 +189,7 @@ async function executeStep(
      return execution;
    }
  
@@ -34,7 +42,7 @@ index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..1d53a1ad4cd181ceace6dea468a91508
    return {
      exitCode: result.exitCode,
      logs: result.logs,
-@@ -210,7 +211,7 @@ async function finalizeStep(
+@@ -210,7 +212,7 @@ async function finalizeStep(
    prepared: PreparedStep,
    execution: CompletedStepExecution
  ): Promise<CompletedStepExecution> {
@@ -181,7 +189,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..7c7014c46cace3785beb5ad944152ef0
      }
    };
 diff --git a/src/ci/step-notification.ts b/src/ci/step-notification.ts
-index 2d70c69e664aa3083fec8346bd51ca2d41101cdc..191e9cb121bfc6ef7ec6f9c098ea0238944d216c 100644
+index 2d70c69e664aa3083fec8346bd51ca2d41101cdc..24e81dbae7f86541a690ebf8a49588bf5d81ad3e 100644
 --- a/src/ci/step-notification.ts
 +++ b/src/ci/step-notification.ts
 @@ -13,17 +13,16 @@ export type StepExecution = {
@@ -207,6 +215,25 @@ index 2d70c69e664aa3083fec8346bd51ca2d41101cdc..191e9cb121bfc6ef7ec6f9c098ea0238
  
  /**
   * Runs and finalizes a runner, then reports success or failure.
+@@ -36,6 +35,9 @@ export async function withStepNotification(
+     label: string;
+     command: string;
+     sensitiveValues: string[];
++    // When the runner sets persist: false, a successful step legitimately has
++    // no workspace snapshot — skip the assertion.
++    persist?: boolean;
+   },
+   execute: () => Promise<StepExecution>,
+   finalize: (
+@@ -56,7 +58,7 @@ export async function withStepNotification(
+         `${input.label} failed with exit code ${execution.exitCode}\n=== stdout ===\n${stdout}\n=== stderr ===\n${stderr}`
+       );
+     }
+-    if (!execution.snapshot) {
++    if (!execution.snapshot && input.persist !== false) {
+       throw new Error(`${input.label} did not produce a workspace snapshot`);
+     }
+     const completed = await finalize({
 diff --git a/src/pipeline/ci-workflow.ts b/src/pipeline/ci-workflow.ts
 index a0ac164d44c2caace0a209652d181b013a2138e9..737040f333037ffa9c8e27554cef6f50017409e1 100644
 --- a/src/pipeline/ci-workflow.ts
