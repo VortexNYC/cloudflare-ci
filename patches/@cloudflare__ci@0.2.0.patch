@@ -25,7 +25,7 @@ index aa6068d5ab399caf3f018e5c7c4a691da57931a7..b55a25f36bb3a5f22f272497a5f987ca
    extraEnv?: Record<string, string>;
    // Snapshot TTL in seconds. Omitted falls back to the sandbox default (3 days).
 diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
-index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..5f591b01740be0babb61b8919b273e8a4c2c4df3 100644
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..cfdd08991a0fc68c6537f28d4e7b9174a1a6b824 100644
 --- a/src/ci/runners/sandbox.ts
 +++ b/src/ci/runners/sandbox.ts
 @@ -19,6 +19,14 @@ const STDERR_FILE = '/tmp/ci-step.err';
@@ -43,7 +43,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..5f591b01740be0babb61b8919b273e8a
  // Keep notification and failure previews bounded by slicing each stream to its
  // tail in the sandbox, where command failures usually surface.
  const TAIL_BYTES = 28_000;
-@@ -39,11 +47,17 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -39,19 +47,25 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
      input: RunStepInput & { restore?: DirectoryBackup }
    ): Promise<RunStepResult<DirectoryBackup>> {
      // create the sandbox handle
@@ -66,6 +66,19 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..5f591b01740be0babb61b8919b273e8a
  
      let cleanupTransferredToStreams = false;
      try {
+-      // Containers without FUSE must restore through the local R2 binding and
+-      // unsquashfs. RPC streams those archives instead of base64-encoding them
+-      // into a single request, which can exceed the local dev request limit.
+-      const localBucket =
+-        (await sandbox.exec('test -c /dev/fuse')).exitCode !== 0;
++      // Always stream archives through the local R2 binding. The presigned-URL
++      // path needs R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY worker secrets, which
++      // makes the pipeline depend on a credential pair it doesn't otherwise
++      // need; RPC streams those archives instead, at some throughput cost.
++      const localBucket = true;
+       if (input.restore) {
+         await sandbox.restoreBackup(input.restore);
+         // Overlay (no rm) so cached node_modules survive while tracked source
 @@ -86,9 +100,23 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
            autoCleanup: false,
          }

@@ -31,8 +31,8 @@ async function timingSafeEqual(a: string, b: string): Promise<boolean> {
     ),
   ]);
   const [aMac, bMac] = await Promise.all([
-    crypto.subtle.sign("HMAC", aKey, encoder.encode("vortex-ci-admin")),
-    crypto.subtle.sign("HMAC", bKey, encoder.encode("vortex-ci-admin")),
+    crypto.subtle.sign("HMAC", aKey, encoder.encode("cloudflare-ci-admin")),
+    crypto.subtle.sign("HMAC", bKey, encoder.encode("cloudflare-ci-admin")),
   ]);
   const aBytes = new Uint8Array(aMac);
   const bBytes = new Uint8Array(bMac);
@@ -117,6 +117,6 @@ export default {
     if (pathname === "/admin/sandbox/kill" && request.method === "POST") {
       return handleSandboxKill(request, env);
     }
-    return new Response("vortex-ci", { status: 200 });
+    return new Response("cloudflare-ci", { status: 200 });
   },
 };

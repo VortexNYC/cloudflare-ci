@@ -2,7 +2,7 @@ import { env } from "node:process";
 
 const accountId =
   env.CLOUDFLARE_ACCOUNT_ID ?? "31bfc2c14a28e0a39e8b9e3c556a18be";
-const workflowName = "vortex-ci";
+const workflowName = "cloudflare-ci";
 
 function parseArgs(argv) {
   const args = {};

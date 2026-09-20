@@ -52,7 +52,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     const config = getRepoConfig(repo);
 
     if (!config) {
-      console.log(`[vortex-ci] skipping unsupported repo: ${String(repo)}`);
+      console.log(`[cloudflare-ci] skipping unsupported repo: ${String(repo)}`);
       return;
     }
 
