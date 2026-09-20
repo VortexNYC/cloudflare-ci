@@ -43,8 +43,15 @@ const installCommand =
 
 // node_modules is pruned (relinked from the in-workspace store on restore);
 // dist is KEPT so preview/deploy never rebuild — they just wrangler-upload.
+// Deps keeps .pnpm-store in its snapshot (that's what downstream installs
+// relink from); proof drops it too — its snapshot exists only to carry dist
+// to terminal steps, which cold-install on the lite pool. An ~850MB store in
+// the archive OOMs the DO isolate when a lite-tier container drains the
+// restore stream too slowly.
 const cleanupCommand =
   'find . -type d \\( -name node_modules -o -name .cache -o -name .wrangler \\) -prune -exec rm -rf {} + 2>/dev/null';
+const proofCleanupCommand =
+  'find . -type d \\( -name node_modules -o -name .cache -o -name .wrangler -o -name .pnpm-store \\) -prune -exec rm -rf {} + 2>/dev/null';
 
 export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
   protected async pipeline(
@@ -70,7 +77,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       `${npmrcCommand} && ` +
       `${installCommand} && ` +
       `${config.proofCommand} && ` +
-      cleanupCommand;
+      proofCleanupCommand;
 
     // Dependency install isolated as its own step so the snapshot cache can
     // reuse it: key is the lockfile/workspace manifests, so an unchanged
