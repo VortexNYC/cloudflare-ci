@@ -1,5 +1,5 @@
 diff --git a/dist/sandbox-DKG3H156.js b/dist/sandbox-DKG3H156.js
-index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..5d273eafda36b9f9712acdf300d94a263752bb74 100644
+index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..78a1759d8de324754af9a2d24197586e4bef1761 100644
 --- a/dist/sandbox-DKG3H156.js
 +++ b/dist/sandbox-DKG3H156.js
 @@ -3514,25 +3514,33 @@ async function* responseToAsyncIterable(response, signal) {
@@ -23,8 +23,7 @@ index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..5d273eafda36b9f9712acdf300d94a26
 +					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 +					controller.close();
 +					return;
- 				}
--				controller.enqueue(encoder.encode("data: [DONE]\n\n"));
++				}
 +				const { done: iterDone, value } = await iterator.next();
 +				if (iterDone || options?.signal?.aborted) {
 +					if (options?.signal?.aborted && !iterDone) await iterator.return?.();
@@ -32,7 +31,8 @@ index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..5d273eafda36b9f9712acdf300d94a26
 +					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 +					controller.close();
 +					return;
-+				}
+ 				}
+-				controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 +				controller.enqueue(encoder.encode(`data: ${serialize(value)}\n\n`));
  			} catch (error) {
  				controller.error(error);
@@ -72,3 +72,55 @@ index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..5d273eafda36b9f9712acdf300d94a26
  				} catch (err) {
  					controller.error(err);
  				}
+@@ -9858,18 +9876,39 @@ var Sandbox = class Sandbox extends Container {
+ 			const archivePath = `${BACKUP_CONTAINER_DIR}/${id}.sqsh`;
+ 			await this.execWithSession(`mkdir -p ${BACKUP_CONTAINER_DIR}`, backupSession, { origin: "internal" });
+ 			if (this.transport === "rpc") {
+-				const body = archiveObject.body;
+-				if (!body) throw new BackupRestoreError({
+-					message: `R2 archive object has no body stream for backup ${id}`,
+-					code: ErrorCode.BACKUP_RESTORE_FAILED,
+-					httpStatus: 500,
+-					context: {
+-						dir,
+-						backupId: id
+-					},
+-					timestamp: (/* @__PURE__ */ new Date()).toISOString()
+-				});
+-				await this.client.files.writeFileStream(archivePath, body, backupSession);
++				// Streaming the R2 body through this isolate into writeFileStream
++				// OOMs the DO on large snapshots — when the worker exposes the
++				// archive over HTTP, let the container curl it straight to disk.
++				const downloadBase = this.env?.BACKUP_DOWNLOAD_BASE_URL;
++				const adminToken = this.env?.ADMIN_TOKEN;
++				if (downloadBase && adminToken) {
++					const dl = await this.execWithSession(
++						`curl -sSf --connect-timeout 10 --max-time 1800 --retry 2 -H ${shellEscape(`Authorization: Bearer ${adminToken}`)} -o ${shellEscape(archivePath)} ${shellEscape(`${downloadBase}/admin/backup/${id}`)}`,
++						backupSession,
++						{ timeout: 181e4, origin: "internal" }
++					);
++					const stat = await this.execWithSession(`stat -c %s ${shellEscape(archivePath)} 2>/dev/null || echo 0`, backupSession, { origin: "internal" }).catch(() => ({ stdout: "0" }));
++					if (dl.exitCode !== 0 || Number.parseInt((stat.stdout ?? "0").trim(), 10) !== archiveObject.size) throw new BackupRestoreError({
++						message: `Archive download failed (exit code ${dl.exitCode}): ${dl.stderr}`,
++						code: ErrorCode.BACKUP_RESTORE_FAILED,
++						httpStatus: 500,
++						context: { dir, backupId: id },
++						timestamp: (/* @__PURE__ */ new Date()).toISOString()
++					});
++				} else {
++					const body = archiveObject.body;
++					if (!body) throw new BackupRestoreError({
++						message: `R2 archive object has no body stream for backup ${id}`,
++						code: ErrorCode.BACKUP_RESTORE_FAILED,
++						httpStatus: 500,
++						context: {
++							dir,
++							backupId: id
++						},
++						timestamp: (/* @__PURE__ */ new Date()).toISOString()
++					});
++					await this.client.files.writeFileStream(archivePath, body, backupSession);
++				}
+ 			} else {
+ 				const archiveBuffer = await archiveObject.arrayBuffer();
+ 				const base64Content = Buffer.from(archiveBuffer).toString("base64");

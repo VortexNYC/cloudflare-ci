@@ -78,6 +78,31 @@ async function handleAdmin(request: Request, env: Bindings): Promise<Response> {
   });
 }
 
+// Archive download for sandbox restores. Restoring by streaming the R2 body
+// through the DO isolate into an RPC writeFileStream OOMs the isolate on
+// large snapshots; serving it over HTTP lets the container curl the object
+// straight to disk, bounded by nothing but bandwidth.
+async function handleBackupDownload(
+  request: Request,
+  env: Bindings,
+  id: string
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers.get("authorization")?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) {
+    return Response.json({ error: "invalid backup id" }, { status: 400 });
+  }
+  const object = await env.BACKUP_BUCKET.get(`backups/${id}/data.sqsh`);
+  if (!object) return new Response("Not Found", { status: 404 });
+  const headers = new Headers();
+  headers.set("content-length", String(object.size));
+  headers.set("content-type", "application/octet-stream");
+  return new Response(object.body, { headers });
+}
+
 // Escape hatch for sandboxes whose step wedged before destroy() ran — a dead
 // exec stream or abandoned log stream leaves the container billing forever.
 async function handleSandboxKill(
@@ -113,6 +138,10 @@ export default {
     const { pathname } = new URL(request.url);
     if (pathname === "/admin/artifacts" && request.method === "POST") {
       return handleAdmin(request, env);
+    }
+    const backupMatch = pathname.match(/^\/admin\/backup\/([0-9a-f-]+)$/);
+    if (backupMatch && request.method === "GET") {
+      return handleBackupDownload(request, env, backupMatch[1]!);
     }
     if (pathname === "/admin/sandbox/kill" && request.method === "POST") {
       return handleSandboxKill(request, env);

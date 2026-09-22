@@ -50,14 +50,18 @@ const relinkCommand = `${installCommand} --config.trustLockfile=true`;
 // node_modules is pruned (relinked from the in-workspace store on restore);
 // dist is KEPT so preview/deploy never rebuild — they just wrangler-upload.
 // Deps keeps .pnpm-store in its snapshot (that's what downstream installs
-// relink from); build drops it too — its snapshot exists only to carry dist
-// to terminal steps, which cold-install on the lite pool. An ~850MB store in
-// the archive OOMs the DO isolate when a lite-tier container drains the
-// restore stream too slowly.
+// relink from); build keeps it too — restores download the archive over
+// HTTP straight to the container, so a ~1GB store no longer OOMs the DO,
+// and preview/deploy relink warm instead of cold-installing on lite.
 const cleanupCommand =
   'find . -type d \\( -name node_modules -o -name .cache -o -name .wrangler \\) -prune -exec rm -rf {} + 2>/dev/null';
+// Build's snapshot additionally preserves .wrangler/deploy: vite/astro
+// builds write a redirect there that points wrangler at the generated
+// dist config — without it terminal steps bundle src/ and crash on
+// framework virtual modules (virtual:emdash/*, astro:content).
 const buildCleanupCommand =
-  'find . -type d \\( -name node_modules -o -name .cache -o -name .wrangler -o -name .pnpm-store \\) -prune -exec rm -rf {} + 2>/dev/null';
+  'find . -type d \\( -name node_modules -o -name .cache \\) -prune -exec rm -rf {} + 2>/dev/null && ' +
+  "find . -path '*/.wrangler/*' ! -path '*/.wrangler/deploy*' -delete 2>/dev/null";
 
 export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
   protected async pipeline(

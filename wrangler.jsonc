@@ -80,6 +80,9 @@
   ],
   "vars": {
     "BACKUP_BUCKET_NAME": "cloudflare-ci-backups",
+    // Containers fetch restore archives over HTTP from this worker instead of
+    // streaming through the DO isolate (which OOMs on large snapshots).
+    "BACKUP_DOWNLOAD_BASE_URL": "https://cloudflare-ci.shlomo-31b.workers.dev",
     "CLOUDFLARE_ACCOUNT_ID": "31bfc2c14a28e0a39e8b9e3c556a18be"
   },
   "observability": {
