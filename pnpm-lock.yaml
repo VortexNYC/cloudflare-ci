@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@cloudflare/ci@0.2.0': 32c0e2a621f7f55bd2978483e6de3e97391f2838142b7982f2b77728c8c9e3db
+  '@cloudflare/ci@0.2.0': d56ec2582afe149d38c1c06bd46fc43878cf95bc31dea275b84e6ab53e9838e7
   '@cloudflare/sandbox': 477547d678aaf67c9722444a437dd2eb43d7d846708d7a527a6e43dc9e8785be
 
 importers:
@@ -14,7 +14,7 @@ importers:
     dependencies:
       '@cloudflare/ci':
         specifier: 0.2.0
-        version: 0.2.0(patch_hash=32c0e2a621f7f55bd2978483e6de3e97391f2838142b7982f2b77728c8c9e3db)
+        version: 0.2.0(patch_hash=d56ec2582afe149d38c1c06bd46fc43878cf95bc31dea275b84e6ab53e9838e7)
       '@cloudflare/sandbox':
         specifier: 0.12.1
         version: 0.12.1(patch_hash=477547d678aaf67c9722444a437dd2eb43d7d846708d7a527a6e43dc9e8785be)
@@ -576,7 +576,7 @@ packages:
 
 snapshots:
 
-  '@cloudflare/ci@0.2.0(patch_hash=32c0e2a621f7f55bd2978483e6de3e97391f2838142b7982f2b77728c8c9e3db)':
+  '@cloudflare/ci@0.2.0(patch_hash=d56ec2582afe149d38c1c06bd46fc43878cf95bc31dea275b84e6ab53e9838e7)':
     dependencies:
       '@cloudflare/sandbox': 0.12.1(patch_hash=477547d678aaf67c9722444a437dd2eb43d7d846708d7a527a6e43dc9e8785be)
       zod: 4.6.5

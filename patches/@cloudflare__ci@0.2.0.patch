@@ -14,7 +14,7 @@ index 433f19c0e750f2957e1c08e9c41600f90b234296..70861ebdf8f16d3258d38446f8b8d5cf
    };
  }
 diff --git a/src/ci/capabilities.ts b/src/ci/capabilities.ts
-index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..c51b88b755eb89a392beb5e4b046401313dfe4d0 100644
+index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..0c1921619744f0efd60af4d1481bb77facbf08aa 100644
 --- a/src/ci/capabilities.ts
 +++ b/src/ci/capabilities.ts
 @@ -78,6 +78,7 @@ export async function runCiStep<
@@ -25,7 +25,7 @@ index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..c51b88b755eb89a392beb5e4b0464013
      },
      () => executeStep(env, input, prepared),
      (execution) => finalizeStep(env, input, prepared, execution)
-@@ -157,6 +158,7 @@ async function executeStep(
+@@ -157,10 +158,12 @@ async function executeStep(
      label: input.label,
      command: input.command,
      cwd: input.cwd,
@@ -33,7 +33,12 @@ index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..c51b88b755eb89a392beb5e4b0464013
      timeoutMs: input.commandTimeoutMs,
      source: prepared.checkout,
      ttlSeconds: input.snapshotTtlSeconds ?? DEFAULT_SNAPSHOT_TTL_SECONDS,
-@@ -187,7 +189,7 @@ async function executeStep(
+     extraEnv: prepared.extraEnv,
++    instanceId: input.instanceId,
+   };
+ 
+   const cache = prepared.cacheKey
+@@ -187,7 +190,7 @@ async function executeStep(
      return execution;
    }
  
@@ -42,7 +47,7 @@ index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..c51b88b755eb89a392beb5e4b0464013
    return {
      exitCode: result.exitCode,
      logs: result.logs,
-@@ -210,7 +212,7 @@ async function finalizeStep(
+@@ -210,7 +213,7 @@ async function finalizeStep(
    prepared: PreparedStep,
    execution: CompletedStepExecution
  ): Promise<CompletedStepExecution> {
@@ -52,10 +57,10 @@ index 9603fd2ff9548c4640fa202aa951ca4fc8256cb0..c51b88b755eb89a392beb5e4b0464013
    }
    // Write the small JSON pointer at the deterministic cache key. It records the
 diff --git a/src/ci/runners/runner.ts b/src/ci/runners/runner.ts
-index aa6068d5ab399caf3f018e5c7c4a691da57931a7..f784bba540051d44c7478af0bc14bfa9cdfeb150 100644
+index aa6068d5ab399caf3f018e5c7c4a691da57931a7..6a099012bf44e7f529e25328d4eb12735d5e8e72 100644
 --- a/src/ci/runners/runner.ts
 +++ b/src/ci/runners/runner.ts
-@@ -8,6 +8,12 @@ export type RunStepInput = {
+@@ -8,8 +8,17 @@ export type RunStepInput = {
    command: string;
    cwd?: string;
    timeoutMs?: number;
@@ -67,12 +72,17 @@ index aa6068d5ab399caf3f018e5c7c4a691da57931a7..f784bba540051d44c7478af0bc14bfa9
 +  persist?: boolean;
    source: SourceControlCheckout;
    extraEnv?: Record<string, string>;
++  // Owning workflow instance — recorded on the capacity reservation so the
++  // ledger can attribute slots to runs.
++  instanceId?: string;
    // Snapshot TTL in seconds. Omitted falls back to the sandbox default (3 days).
+   ttlSeconds?: number;
+ };
 diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
-index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..d727eece5cb38a8562b070b90975934accbddf1d 100644
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedce08f5c19 100644
 --- a/src/ci/runners/sandbox.ts
 +++ b/src/ci/runners/sandbox.ts
-@@ -17,8 +17,19 @@ const WORKSPACE_DIR = '/workspace';
+@@ -17,13 +17,46 @@ const WORKSPACE_DIR = '/workspace';
  const STDOUT_FILE = '/tmp/ci-step.out';
  const STDERR_FILE = '/tmp/ci-step.err';
  const COMMAND_TIMEOUT_MS = 11 * 60 * 1000;
@@ -93,20 +103,71 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..d727eece5cb38a8562b070b90975934a
  // Keep notification and failure previews bounded by slicing each stream to its
  // tail in the sandbox, where command failures usually surface.
  const TAIL_BYTES = 28_000;
-@@ -39,21 +50,43 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+ // Two inline logs plus result metadata must remain below Workflows' 1 MiB limit.
+ const INLINE_LOG_BYTES = 300_000;
++// How long a step may wait for sandbox capacity before failing. Long enough
++// to ride out a sibling run's step, short enough to surface real saturation.
++const ADMIT_TIMEOUT_MS = 10 * 60 * 1000;
++
++// Structural type for the worker's CI_SCHEDULER durable object — this package
++// can't import the host worker's DO class.
++type SchedulerStub = {
++  admit(input: {
++    pool: string;
++    name: string;
++    instanceId?: string;
++  }): Promise<{ ok: boolean; reason?: string }>;
++  release(name: string): Promise<void>;
++};
++
++function getScheduler(env: Bindings): SchedulerStub | undefined {
++  const ns = (
++    env as unknown as Record<string, DurableObjectNamespace | undefined>
++  )['CI_SCHEDULER'];
++  if (!ns) return undefined;
++  return ns.get(ns.idFromName('global')) as unknown as SchedulerStub;
++}
+ 
+ export class SandboxRunner implements Runner<DirectoryBackup> {
+   readonly name = 'sandbox';
+@@ -38,22 +71,56 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+   async run(
      input: RunStepInput & { restore?: DirectoryBackup }
    ): Promise<RunStepResult<DirectoryBackup>> {
-     // create the sandbox handle
+-    // create the sandbox handle
 -    const sandbox = getSandbox(this.env.SANDBOX, createRunnerId(input.label), {
 -      transport: 'rpc',
 -      enableDefaultSession: false,
 -      containerTimeouts: { portReadyTimeoutMS: PORT_READY_TIMEOUT_MS },
 -    });
++    // create the sandbox handle — but reserve capacity first. A single
++    // scheduler DO serializes admissions against the app's instance cap so
++    // concurrent steps can't race the platform into "WebSocket upgrade
++    // failed: 503" territory, and dead reservations get reaped on admission.
++    const pool = input.sandbox ?? 'SANDBOX';
 +    const runnerName = createRunnerId(input.label);
++    const scheduler = getScheduler(this.env);
++    if (scheduler) {
++      const deadline = Date.now() + ADMIT_TIMEOUT_MS;
++      for (;;) {
++        const verdict = await scheduler.admit({
++          pool,
++          name: runnerName,
++          instanceId: input.instanceId,
++        });
++        if (verdict.ok) break;
++        if (Date.now() >= deadline) {
++          throw new Error(`sandbox admission timed out: ${verdict.reason}`);
++        }
++        await new Promise((resolve) =>
++          setTimeout(resolve, 2000 + Math.random() * 3000)
++        );
++      }
++    }
 +    const sandbox = getSandbox(
 +      (
 +        this.env as unknown as Record<string, Bindings['SANDBOX']>
-+      )[input.sandbox ?? 'SANDBOX'],
++      )[pool],
 +      runnerName,
 +      {
 +        transport: 'rpc',
@@ -114,16 +175,6 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..d727eece5cb38a8562b070b90975934a
 +        containerTimeouts: { portReadyTimeoutMS: PORT_READY_TIMEOUT_MS },
 +      }
 +    );
-+
-+    // Register the instance so the sweeper can reap it if this run dies
-+    // without reaching destroy — inactive containers still consume the
-+    // app's instance cap and starve later spawns.
-+    const markerKey = `ci/sandboxes/${input.sandbox ?? 'SANDBOX'}/${runnerName}`;
-+    try {
-+      await this.env.BACKUP_BUCKET.put(markerKey, new Date().toISOString());
-+    } catch {
-+      // best-effort: marker loss only weakens the sweep
-+    }
  
      let cleanupTransferredToStreams = false;
      try {
@@ -147,7 +198,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..d727eece5cb38a8562b070b90975934a
          // Overlay (no rm) so cached node_modules survive while tracked source
          // files are refreshed to this commit. The restored archive may carry a
          // different commit's source (e.g. a reused install cache), so this is
-@@ -67,12 +100,14 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -67,12 +134,14 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
              env: checkoutSourceEnv(input.source),
            }
          );
@@ -162,7 +213,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..d727eece5cb38a8562b070b90975934a
        }
  
        const proc = await sandbox.startProcess(
-@@ -86,22 +121,40 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -86,22 +155,40 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
            autoCleanup: false,
          }
        );
@@ -213,25 +264,25 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..d727eece5cb38a8562b070b90975934a
        const rawLogs = await readLogs(sandbox);
        const streams = [rawLogs.stdout, rawLogs.stderr].filter(
          (value): value is ReadableStream<Uint8Array> =>
-@@ -115,7 +168,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -115,7 +202,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
        const releaseStream = async () => {
          remainingStreams -= 1;
          if (remainingStreams === 0) {
 -          await destroySandbox(sandbox);
-+          await destroySandbox(sandbox, this.env, markerKey);
++          await destroySandbox(sandbox, scheduler, runnerName);
          }
        };
        cleanupTransferredToStreams = true;
-@@ -136,7 +189,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -136,7 +223,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
        };
      } finally {
        if (!cleanupTransferredToStreams) {
 -        await destroySandbox(sandbox);
-+        await destroySandbox(sandbox, this.env, markerKey);
++        await destroySandbox(sandbox, scheduler, runnerName);
        }
      }
    }
-@@ -204,9 +257,14 @@ function withCleanup(
+@@ -204,9 +291,14 @@ function withCleanup(
  ) {
    const reader = stream.getReader();
    let released = false;
@@ -246,26 +297,30 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..d727eece5cb38a8562b070b90975934a
        await release();
      }
    };
-@@ -239,10 +297,21 @@ function createRunnerId(label: string) {
+@@ -239,10 +331,25 @@ function createRunnerId(label: string) {
    return `${slugify(label).slice(0, 16)}-${crypto.randomUUID()}`;
  }
  
 -async function destroySandbox(sandbox: ReturnType<typeof getSandbox>) {
 +async function destroySandbox(
 +  sandbox: ReturnType<typeof getSandbox>,
-+  env?: Bindings,
-+  markerKey?: string
++  scheduler?: SchedulerStub,
++  runnerName?: string
 +) {
++  let destroyed = false;
    try {
      await sandbox.destroy();
++    destroyed = true;
    } catch (error) {
      console.error('Failed to destroy CI sandbox', { error });
    }
-+  if (env && markerKey) {
++  // Release on successful destroy; on failure keep the reservation so the
++  // stale reaper retries instead of silently leaking the slot.
++  if (destroyed && scheduler && runnerName) {
 +    try {
-+      await env.BACKUP_BUCKET.delete(markerKey);
++      await scheduler.release(runnerName);
 +    } catch {
-+      // marker is best-effort
++      // stale reservation is reaped by age
 +    }
 +  }
  }

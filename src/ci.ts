@@ -80,31 +80,33 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
 
     // Platform push events can fan out duplicate workflow instances for one
     // push — each one would spawn its own billable containers. Keep only the
-    // newest run per repo+branch: instances write a pointer to R2, then
-    // re-read it after jitter; whoever was overwritten exits before spending
-    // a container-minute. Re-checked between steps so a newer push also
-    // stops a stale run already past the gate.
-    const dedupeKey = `ci/latest/${String(repo)}/${String(branch ?? _event.payload.sha ?? "detached")}`;
-    const myPointer = JSON.stringify({
-      instanceId: _event.instanceId,
-      sha: _event.payload.sha,
-      ts: _event.timestamp,
-    });
+    // newest run per repo+branch: the scheduler DO serializes claims, so the
+    // last claim wins atomically and losers exit before spending a
+    // container-minute. Re-checked between steps so a newer push also stops
+    // a stale run already past the gate.
+    const scheduler = this.env.CI_SCHEDULER.get(
+      this.env.CI_SCHEDULER.idFromName("global")
+    );
+    const branchKey = String(branch ?? _event.payload.sha ?? "detached");
     const supersededBy = async (): Promise<string | null> => {
-      const pointer = await this.env.BACKUP_BUCKET.get(dedupeKey)
-        .then((o) => o?.json<{ instanceId?: string }>())
-        .catch(() => undefined);
-      return pointer?.instanceId && pointer.instanceId !== _event.instanceId
-        ? pointer.instanceId
+      const claim = await scheduler.getClaim(String(repo), branchKey);
+      return claim && claim.instanceId !== _event.instanceId
+        ? claim.instanceId
         : null;
     };
-    await new Promise((r) => setTimeout(r, Math.random() * 2000));
-    await this.env.BACKUP_BUCKET.put(dedupeKey, myPointer);
-    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 2000));
+    await scheduler.claim(
+      String(repo),
+      branchKey,
+      _event.instanceId,
+      _event.payload.sha
+    );
+    // Duplicate events fan out over seconds — let a tight burst settle so a
+    // slightly-later claim can supersede before we spawn anything.
+    await new Promise((r) => setTimeout(r, 2000));
     let winner = await supersededBy();
     if (winner) {
       console.log(
-        `[cloudflare-ci] superseded by ${winner} for ${String(repo)}@${String(branch)} — exiting before any container spawn`
+        `[cloudflare-ci] superseded by ${winner} for ${String(repo)}@${branchKey} — exiting before any container spawn`
       );
       return;
     }
