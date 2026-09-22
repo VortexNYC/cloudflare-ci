@@ -78,6 +78,37 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       return;
     }
 
+    // Platform push events can fan out duplicate workflow instances for one
+    // push — each one would spawn its own billable containers. Keep only the
+    // newest run per repo+branch: instances write a pointer to R2, then
+    // re-read it after jitter; whoever was overwritten exits before spending
+    // a container-minute. Re-checked between steps so a newer push also
+    // stops a stale run already past the gate.
+    const dedupeKey = `ci/latest/${String(repo)}/${String(branch ?? _event.payload.sha ?? "detached")}`;
+    const myPointer = JSON.stringify({
+      instanceId: _event.instanceId,
+      sha: _event.payload.sha,
+      ts: _event.timestamp,
+    });
+    const supersededBy = async (): Promise<string | null> => {
+      const pointer = await this.env.BACKUP_BUCKET.get(dedupeKey)
+        .then((o) => o?.json<{ instanceId?: string }>())
+        .catch(() => undefined);
+      return pointer?.instanceId && pointer.instanceId !== _event.instanceId
+        ? pointer.instanceId
+        : null;
+    };
+    await new Promise((r) => setTimeout(r, Math.random() * 2000));
+    await this.env.BACKUP_BUCKET.put(dedupeKey, myPointer);
+    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 2000));
+    let winner = await supersededBy();
+    if (winner) {
+      console.log(
+        `[cloudflare-ci] superseded by ${winner} for ${String(repo)}@${String(branch)} — exiting before any container spawn`
+      );
+      return;
+    }
+
     const baseEnv = {
       ...config.installEnv,
       ...config.buildEnv,
@@ -121,6 +152,12 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         commandTimeoutMs: BUILD_COMMAND_TIMEOUT_MS,
       },
     });
+
+    winner = await supersededBy();
+    if (winner) {
+      console.log(`[cloudflare-ci] superseded by ${winner} after build — skipping terminal steps`);
+      return;
+    }
 
     if (branch !== "main") {
       if (config.previewCommand) {
