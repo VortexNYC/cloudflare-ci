@@ -132,9 +132,9 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           .slice(0, 40);
         const previewEnv = { ...baseEnv, CI_PREVIEW_ALIAS: previewAlias };
 
-        // dist/ rides build's snapshot, so preview is upload-only — install
-        // (esbuild resolves from node_modules) + wrangler versions upload.
-        // Network-bound: quarter-vCPU lite pool is plenty.
+        // dist/ + .pnpm-store ride build's snapshot, so preview is warm
+        // relink + wrangler versions upload. Standard pool — the lite tier's
+        // disk can't hold the ~1GB archive plus its extraction.
         const previewCommand =
           `${npmrcCommand} && ` +
           `${relinkCommand} && ` +
@@ -144,7 +144,6 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           name: "preview",
           command: previewCommand,
           secrets: ["NPM_TOKEN"],
-          sandbox: "SANDBOX_LITE",
           persist: false,
           cloudflareCredentials: {
             accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
@@ -160,12 +159,10 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     }
 
     if (config.d1Database) {
-      await buildResult.runner({
+      await ci.runner({
         name: "migrate",
-        // Runs a single wrangler CLI call — no install or build — so it goes
-        // on the quarter-vCPU lite pool instead of the standard sandbox. It
-        // only mutates remote D1, not /workspace, so persist: false and deploy
-        // chains off build's snapshot rather than migrate's.
+        // One wrangler CLI call on a fresh checkout — no restore, no install,
+        // no snapshot. Cheapest possible shape on the lite pool.
         sandbox: "SANDBOX_LITE",
         persist: false,
         command: `wrangler d1 migrations apply ${config.d1Database} --env production --remote`,
