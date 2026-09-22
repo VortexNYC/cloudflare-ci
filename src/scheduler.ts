@@ -24,6 +24,7 @@ export type Reservation = {
 export type RunClaim = {
   instanceId: string;
   sha?: string;
+  status: "running" | "completed";
   at: number;
 };
 
@@ -93,23 +94,55 @@ export class CiScheduler extends DurableObject<Bindings> {
     await this.ctx.storage.delete(`resv/${name}`);
   }
 
+  /**
+   * Atomic newest-wins claim per repo+branch. Returns false when the branch's
+   * sha already completed — duplicate events arrive minutes late and would
+   * otherwise re-run the whole pipeline after the winner finished.
+   */
   async claim(
     repo: string,
     branch: string,
     instanceId: string,
     sha?: string
-  ): Promise<void> {
+  ): Promise<boolean> {
+    const existing = await this.getClaim(repo, branch);
+    if (
+      existing &&
+      sha &&
+      existing.sha === sha &&
+      existing.status === "completed"
+    ) {
+      return false;
+    }
     await this.ctx.storage.put(`claim/${repo}/${branch}`, {
       instanceId,
       sha,
+      status: "running",
       at: Date.now(),
     } satisfies RunClaim);
+    return true;
   }
 
   async getClaim(repo: string, branch: string): Promise<RunClaim | null> {
     return (
       (await this.ctx.storage.get<RunClaim>(`claim/${repo}/${branch}`)) ?? null
     );
+  }
+
+  /** Mark the current winner finished — same-sha duplicates stop re-running. */
+  async completeClaim(
+    repo: string,
+    branch: string,
+    instanceId: string
+  ): Promise<void> {
+    const existing = await this.getClaim(repo, branch);
+    if (existing?.instanceId === instanceId) {
+      await this.ctx.storage.put(`claim/${repo}/${branch}`, {
+        ...existing,
+        status: "completed",
+        at: Date.now(),
+      } satisfies RunClaim);
+    }
   }
 
   async sweep(): Promise<{

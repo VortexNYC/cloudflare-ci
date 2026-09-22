@@ -94,12 +94,18 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         ? claim.instanceId
         : null;
     };
-    await scheduler.claim(
+    const claimed = await scheduler.claim(
       String(repo),
       branchKey,
       _event.instanceId,
       _event.payload.sha
     );
+    if (!claimed) {
+      console.log(
+        `[cloudflare-ci] ${String(repo)}@${branchKey} ${_event.payload.sha} already completed — duplicate event, exiting`
+      );
+      return;
+    }
     // Duplicate events fan out over seconds — let a tight burst settle so a
     // slightly-later claim can supersede before we spawn anything.
     await new Promise((r) => setTimeout(r, 2000));
@@ -194,6 +200,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           },
         });
       }
+      await scheduler.completeClaim(String(repo), branchKey, _event.instanceId);
       return;
     }
 
@@ -238,5 +245,6 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
       },
     });
+    await scheduler.completeClaim(String(repo), branchKey, _event.instanceId);
   }
 }
