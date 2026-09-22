@@ -85,6 +85,9 @@
     "BACKUP_DOWNLOAD_BASE_URL": "https://cloudflare-ci.shlomo-31b.workers.dev",
     "CLOUDFLARE_ACCOUNT_ID": "31bfc2c14a28e0a39e8b9e3c556a18be"
   },
+  "triggers": {
+    "crons": ["17 * * * *"]
+  },
   "observability": {
     "enabled": true,
     "logs": {

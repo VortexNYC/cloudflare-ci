@@ -69,7 +69,7 @@ index aa6068d5ab399caf3f018e5c7c4a691da57931a7..f784bba540051d44c7478af0bc14bfa9
    extraEnv?: Record<string, string>;
    // Snapshot TTL in seconds. Omitted falls back to the sandbox default (3 days).
 diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
-index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..942fed28cebc8f28e18e5004544e96bbd1bd4d2f 100644
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..d727eece5cb38a8562b070b90975934accbddf1d 100644
 --- a/src/ci/runners/sandbox.ts
 +++ b/src/ci/runners/sandbox.ts
 @@ -17,8 +17,19 @@ const WORKSPACE_DIR = '/workspace';
@@ -93,7 +93,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..942fed28cebc8f28e18e5004544e96bb
  // Keep notification and failure previews bounded by slicing each stream to its
  // tail in the sandbox, where command failures usually surface.
  const TAIL_BYTES = 28_000;
-@@ -39,21 +50,32 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -39,21 +50,43 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
      input: RunStepInput & { restore?: DirectoryBackup }
    ): Promise<RunStepResult<DirectoryBackup>> {
      // create the sandbox handle
@@ -102,17 +102,28 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..942fed28cebc8f28e18e5004544e96bb
 -      enableDefaultSession: false,
 -      containerTimeouts: { portReadyTimeoutMS: PORT_READY_TIMEOUT_MS },
 -    });
++    const runnerName = createRunnerId(input.label);
 +    const sandbox = getSandbox(
 +      (
 +        this.env as unknown as Record<string, Bindings['SANDBOX']>
 +      )[input.sandbox ?? 'SANDBOX'],
-+      createRunnerId(input.label),
++      runnerName,
 +      {
 +        transport: 'rpc',
 +        enableDefaultSession: false,
 +        containerTimeouts: { portReadyTimeoutMS: PORT_READY_TIMEOUT_MS },
 +      }
 +    );
++
++    // Register the instance so the sweeper can reap it if this run dies
++    // without reaching destroy — inactive containers still consume the
++    // app's instance cap and starve later spawns.
++    const markerKey = `ci/sandboxes/${input.sandbox ?? 'SANDBOX'}/${runnerName}`;
++    try {
++      await this.env.BACKUP_BUCKET.put(markerKey, new Date().toISOString());
++    } catch {
++      // best-effort: marker loss only weakens the sweep
++    }
  
      let cleanupTransferredToStreams = false;
      try {
@@ -136,7 +147,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..942fed28cebc8f28e18e5004544e96bb
          // Overlay (no rm) so cached node_modules survive while tracked source
          // files are refreshed to this commit. The restored archive may carry a
          // different commit's source (e.g. a reused install cache), so this is
-@@ -67,12 +89,14 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -67,12 +100,14 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
              env: checkoutSourceEnv(input.source),
            }
          );
@@ -151,7 +162,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..942fed28cebc8f28e18e5004544e96bb
        }
  
        const proc = await sandbox.startProcess(
-@@ -86,22 +110,40 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -86,22 +121,40 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
            autoCleanup: false,
          }
        );
@@ -202,7 +213,25 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..942fed28cebc8f28e18e5004544e96bb
        const rawLogs = await readLogs(sandbox);
        const streams = [rawLogs.stdout, rawLogs.stderr].filter(
          (value): value is ReadableStream<Uint8Array> =>
-@@ -204,9 +246,14 @@ function withCleanup(
+@@ -115,7 +168,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+       const releaseStream = async () => {
+         remainingStreams -= 1;
+         if (remainingStreams === 0) {
+-          await destroySandbox(sandbox);
++          await destroySandbox(sandbox, this.env, markerKey);
+         }
+       };
+       cleanupTransferredToStreams = true;
+@@ -136,7 +189,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+       };
+     } finally {
+       if (!cleanupTransferredToStreams) {
+-        await destroySandbox(sandbox);
++        await destroySandbox(sandbox, this.env, markerKey);
+       }
+     }
+   }
+@@ -204,9 +257,14 @@ function withCleanup(
  ) {
    const reader = stream.getReader();
    let released = false;
@@ -217,6 +246,29 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..942fed28cebc8f28e18e5004544e96bb
        await release();
      }
    };
+@@ -239,10 +297,21 @@ function createRunnerId(label: string) {
+   return `${slugify(label).slice(0, 16)}-${crypto.randomUUID()}`;
+ }
+ 
+-async function destroySandbox(sandbox: ReturnType<typeof getSandbox>) {
++async function destroySandbox(
++  sandbox: ReturnType<typeof getSandbox>,
++  env?: Bindings,
++  markerKey?: string
++) {
+   try {
+     await sandbox.destroy();
+   } catch (error) {
+     console.error('Failed to destroy CI sandbox', { error });
+   }
++  if (env && markerKey) {
++    try {
++      await env.BACKUP_BUCKET.delete(markerKey);
++    } catch {
++      // marker is best-effort
++    }
++  }
+ }
 diff --git a/src/ci/step-notification.ts b/src/ci/step-notification.ts
 index 2d70c69e664aa3083fec8346bd51ca2d41101cdc..24e81dbae7f86541a690ebf8a49588bf5d81ad3e 100644
 --- a/src/ci/step-notification.ts

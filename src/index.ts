@@ -160,6 +160,60 @@ async function handleSandboxKill(
   return Response.json(results);
 }
 
+// Terminated/failed workflow runs leave inactive container instances behind,
+// and inactive instances still count against the app's instance cap — the
+// next spawn then fails with "WebSocket upgrade failed: 503". The runner
+// registers every sandbox it spawns under ci/sandboxes/<binding>/<name> and
+// removes the marker on clean destroy; sweep reaps markers older than the
+// longest possible step so a dead run's containers can't linger.
+const SWEEP_MIN_AGE_MS = 60 * 60 * 1000;
+
+async function handleSandboxSweep(
+  request: Request,
+  env: Bindings
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers.get("authorization")?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  return Response.json(await sweepSandboxes(env));
+}
+
+async function sweepSandboxes(
+  env: Bindings
+): Promise<Record<string, string[]>> {
+  const cutoff = Date.now() - SWEEP_MIN_AGE_MS;
+  const results: Record<string, string[]> = { destroyed: [], skipped: [] };
+  const listed = await env.BACKUP_BUCKET.list({ prefix: "ci/sandboxes/" });
+
+  for (const object of listed.objects) {
+    const [, , binding, name] = object.key.split("/");
+    if (
+      (binding !== "SANDBOX" && binding !== "SANDBOX_LITE") ||
+      !name ||
+      !/^[a-z0-9-]+$/.test(name)
+    ) {
+      results.skipped.push(object.key);
+      continue;
+    }
+    if (object.uploaded.getTime() > cutoff) {
+      results.skipped.push(`${name} (young)`);
+      continue;
+    }
+    try {
+      await getSandbox(env[binding], name).destroy();
+      results.destroyed.push(name);
+    } catch (error) {
+      results.skipped.push(
+        `${name}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    await env.BACKUP_BUCKET.delete(object.key);
+  }
+  return results;
+}
+
 export default {
   fetch(request: Request, env: Bindings) {
     const { pathname } = new URL(request.url);
@@ -173,6 +227,18 @@ export default {
     if (pathname === "/admin/sandbox/kill" && request.method === "POST") {
       return handleSandboxKill(request, env);
     }
+    if (pathname === "/admin/sandbox/sweep" && request.method === "POST") {
+      return handleSandboxSweep(request, env);
+    }
     return new Response("cloudflare-ci", { status: 200 });
+  },
+  async scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    ctx.waitUntil(
+      sweepSandboxes(env).then((results) => {
+        if (results.destroyed.length > 0) {
+          console.log("sandbox sweep", results);
+        }
+      })
+    );
   },
 };
