@@ -95,11 +95,38 @@ async function handleBackupDownload(
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) {
     return Response.json({ error: "invalid backup id" }, { status: 400 });
   }
-  const object = await env.BACKUP_BUCKET.get(`backups/${id}/data.sqsh`);
+  const key = `backups/${id}/data.sqsh`;
+  // Range passthrough lets the container parallel-download large archives.
+  const rangeHeader = request.headers.get("range");
+  const rangeMatch = rangeHeader?.match(/^bytes=(\d+)-(\d*)$/);
+  if (rangeMatch) {
+    const offset = Number(rangeMatch[1]);
+    const suffix = rangeMatch[2];
+    const [head, object] = await Promise.all([
+      env.BACKUP_BUCKET.head(key),
+      env.BACKUP_BUCKET.get(key, {
+        range: suffix
+          ? { offset, length: Number(suffix) - offset + 1 }
+          : { offset },
+      }),
+    ]);
+    if (!head || !object) return new Response("Not Found", { status: 404 });
+    const headers = new Headers();
+    headers.set("content-length", String(object.size));
+    headers.set("content-type", "application/octet-stream");
+    headers.set(
+      "content-range",
+      `bytes ${offset}-${offset + object.size - 1}/${head.size}`
+    );
+    headers.set("accept-ranges", "bytes");
+    return new Response(object.body, { status: 206, headers });
+  }
+  const object = await env.BACKUP_BUCKET.get(key);
   if (!object) return new Response("Not Found", { status: 404 });
   const headers = new Headers();
   headers.set("content-length", String(object.size));
   headers.set("content-type", "application/octet-stream");
+  headers.set("accept-ranges", "bytes");
   return new Response(object.body, { headers });
 }
 

@@ -1,5 +1,5 @@
 diff --git a/dist/sandbox-DKG3H156.js b/dist/sandbox-DKG3H156.js
-index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..78a1759d8de324754af9a2d24197586e4bef1761 100644
+index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..064719dfdc28e483d7ec9d283af228014d253608 100644
 --- a/dist/sandbox-DKG3H156.js
 +++ b/dist/sandbox-DKG3H156.js
 @@ -3514,25 +3514,33 @@ async function* responseToAsyncIterable(response, signal) {
@@ -72,7 +72,7 @@ index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..78a1759d8de324754af9a2d24197586e
  				} catch (err) {
  					controller.error(err);
  				}
-@@ -9858,18 +9876,39 @@ var Sandbox = class Sandbox extends Container {
+@@ -9858,18 +9876,49 @@ var Sandbox = class Sandbox extends Container {
  			const archivePath = `${BACKUP_CONTAINER_DIR}/${id}.sqsh`;
  			await this.execWithSession(`mkdir -p ${BACKUP_CONTAINER_DIR}`, backupSession, { origin: "internal" });
  			if (this.transport === "rpc") {
@@ -94,13 +94,23 @@ index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..78a1759d8de324754af9a2d24197586e
 +				const downloadBase = this.env?.BACKUP_DOWNLOAD_BASE_URL;
 +				const adminToken = this.env?.ADMIN_TOKEN;
 +				if (downloadBase && adminToken) {
++					const url = shellEscape(`${downloadBase}/admin/backup/${id}`);
++					const auth = `-H ${shellEscape(`Authorization: Bearer ${adminToken}`)}`;
++					const size = archiveObject.size;
++					const parts = size >= 100 * 1024 * 1024 ? 8 : 1;
++					const partSize = Math.floor(size / parts);
++					const cmds = Array.from({ length: parts }, (_, i) => {
++						const start = i * partSize;
++						const end = i < parts - 1 ? start + partSize - 1 : size - 1;
++						return `(curl -sSf --connect-timeout 10 --max-time 1800 --retry 2 ${auth} -H ${shellEscape(`Range: bytes=${start}-${end}`)} ${url} | dd of=${shellEscape(archivePath)} oflag=seek_bytes seek=${start} conv=notrunc status=none)`;
++					}).join(" & ");
 +					const dl = await this.execWithSession(
-+						`curl -sSf --connect-timeout 10 --max-time 1800 --retry 2 -H ${shellEscape(`Authorization: Bearer ${adminToken}`)} -o ${shellEscape(archivePath)} ${shellEscape(`${downloadBase}/admin/backup/${id}`)}`,
++						`dd if=/dev/zero of=${shellEscape(archivePath)} bs=1 count=0 status=none && ${cmds} && wait`,
 +						backupSession,
 +						{ timeout: 181e4, origin: "internal" }
 +					);
 +					const stat = await this.execWithSession(`stat -c %s ${shellEscape(archivePath)} 2>/dev/null || echo 0`, backupSession, { origin: "internal" }).catch(() => ({ stdout: "0" }));
-+					if (dl.exitCode !== 0 || Number.parseInt((stat.stdout ?? "0").trim(), 10) !== archiveObject.size) throw new BackupRestoreError({
++					if (dl.exitCode !== 0 || Number.parseInt((stat.stdout ?? "0").trim(), 10) !== size) throw new BackupRestoreError({
 +						message: `Archive download failed (exit code ${dl.exitCode}): ${dl.stderr}`,
 +						code: ErrorCode.BACKUP_RESTORE_FAILED,
 +						httpStatus: 500,
