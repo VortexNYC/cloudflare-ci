@@ -66,7 +66,7 @@ const repoConfigs: Record<string, RepoConfig> = {
     // runs in the pre-push hook locally.
     buildCommand: "pnpm exec vp run typecheck",
     deployCommand: "pnpm exec wrangler deploy -e production",
-    d1Database: "issuetracker-global",
+    d1Database: "pile-global",
     d1MigrationsCwd: ".",
   },
 };
