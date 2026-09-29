@@ -157,7 +157,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     const buildResult = await depsResult.runner({
       name: "build",
       command: buildOnlyCommand,
-      secrets: ["NPM_TOKEN"],
+      secrets: ["NPM_TOKEN", ...config.buildSecrets],
       env: baseEnv,
       config: {
         timeout: BUILD_STEP_TIMEOUT_MS,

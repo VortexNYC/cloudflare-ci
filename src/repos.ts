@@ -17,6 +17,9 @@ const repoConfigSchema = z.object({
   verifyEnv: z.record(z.string()).default({}),
   // Named worker secrets injected into the verify step env (authed probes).
   verifySecrets: z.array(z.string()).default([]),
+  // Extra secrets injected into the build step alongside NPM_TOKEN
+  // (e.g. PostHog sourcemap upload for Seal).
+  buildSecrets: z.array(z.string()).default([]),
   d1Database: z.string().optional(),
   d1MigrationsCwd: z.string().default("."),
 });
@@ -38,7 +41,12 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       // without this the generated config ships dev bindings to production.
       CLOUDFLARE_ENV: "production",
       HOME: "/tmp",
+      // Public PostHog project id — pairs with POSTHOG_CLI_API_KEY secret.
+      POSTHOG_CLI_PROJECT_ID: "280403",
+      POSTHOG_CLI_HOST: "https://us.i.posthog.com",
     },
+    // Seal web build uploads hidden source maps when this secret is present.
+    buildSecrets: ["POSTHOG_CLI_API_KEY"],
     installEnv: {
       HOME: "/tmp",
       CI: "true",
