@@ -209,10 +209,13 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         name: "migrate",
         // One wrangler CLI call on a fresh checkout — no restore, no install,
         // no snapshot. Cheapest possible shape on the lite pool.
+        // The deploy token (CF_TOKEN) is containers+workers scoped; D1 query
+        // perms live on CF_TOKEN_MIGRATE so each secret stays least-privilege.
         sandbox: "SANDBOX_LITE",
         persist: false,
-        command: `wrangler d1 migrations apply ${config.d1Database} --env production --remote`,
+        command: `CLOUDFLARE_API_TOKEN="$CF_TOKEN_MIGRATE" wrangler d1 migrations apply ${config.d1Database} --env production --remote`,
         cwd: config.d1MigrationsCwd,
+        secrets: ["CF_TOKEN_MIGRATE"],
         cloudflareCredentials: {
           accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
         },
