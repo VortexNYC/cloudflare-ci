@@ -10,6 +10,13 @@ const repoConfigSchema = z.object({
   buildCommand: z.string(),
   deployCommand: z.string(),
   previewCommand: z.string().optional(),
+  // Post-ship probe on the lite pool, run after deploy on main only.
+  // Non-zero exit fails the run — a deploy that uploads but does not serve
+  // is a failed deploy. Keep it curl-level: no workspace restore, no installs.
+  verifyCommand: z.string().optional(),
+  verifyEnv: z.record(z.string()).default({}),
+  // Named worker secrets injected into the verify step env (authed probes).
+  verifySecrets: z.array(z.string()).default([]),
   d1Database: z.string().optional(),
   d1MigrationsCwd: z.string().default("."),
 });
@@ -18,7 +25,9 @@ export type RepoConfig = z.infer<typeof repoConfigSchema>;
 
 const buildCommand = "pnpm exec vp run build:all";
 
-const repoConfigs: Record<string, RepoConfig> = {
+// Input-typed so schema defaults apply at getRepoConfig's parse — config
+// literals only set fields they care about.
+const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
   "seal": {
     name: "seal",
     buildEnv: {
@@ -51,6 +60,9 @@ const repoConfigs: Record<string, RepoConfig> = {
       '(cd apps/web && pnpm exec wrangler versions upload -e production --preview-alias "$CI_PREVIEW_ALIAS") && ' +
       '(cd apps/site && pnpm exec wrangler versions upload -e production --preview-alias "$CI_PREVIEW_ALIAS") && ' +
       '(cd apps/docs && pnpm exec wrangler versions upload -e production --preview-alias "$CI_PREVIEW_ALIAS")',
+    // api.seal.nyc is the worker the product's traffic depends on; a 200 on
+    // /health right after deploy proves the upload serves, not just uploads.
+    verifyCommand: 'curl -fsS --max-time 15 https://api.seal.nyc/health',
     d1Database: "seal-global",
     d1MigrationsCwd: "apps/api",
   },
@@ -66,6 +78,7 @@ const repoConfigs: Record<string, RepoConfig> = {
     // runs in the pre-push hook locally.
     buildCommand: "pnpm exec vp run typecheck",
     deployCommand: "pnpm exec wrangler deploy -e production",
+    verifyCommand: 'curl -fsS --max-time 15 https://pile.nyc/health',
     d1Database: "pile-global",
     d1MigrationsCwd: ".",
   },

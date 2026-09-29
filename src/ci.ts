@@ -24,6 +24,10 @@ const MIGRATE_STEP_TIMEOUT_MS = 10 * MINUTE;
 const MIGRATE_COMMAND_TIMEOUT_MS = 3 * MINUTE;
 const DEPLOY_STEP_TIMEOUT_MS = 28 * MINUTE;
 const DEPLOY_COMMAND_TIMEOUT_MS = 25 * MINUTE;
+// Verify probes are curl-level on the lite pool — a hung endpoint must fail
+// fast, not hold the run open.
+const VERIFY_STEP_TIMEOUT_MS = 6 * MINUTE;
+const VERIFY_COMMAND_TIMEOUT_MS = 5 * MINUTE;
 
 // The sandbox runs every command as a wrapped subshell, so we only need the
 // shell string itself. We deliberately keep the workspace free of node_modules
@@ -248,6 +252,27 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
       },
     });
+
+    // Post-deploy proof, same lite-pool shape as migrate: self-contained
+    // command, no workspace restore. A non-zero exit fails the run — a
+    // deploy that uploads but does not serve is a failed deploy.
+    if (config.verifyCommand) {
+      await ci.runner({
+        name: "verify",
+        sandbox: "SANDBOX_LITE",
+        persist: false,
+        command: config.verifyCommand,
+        secrets: config.verifySecrets,
+        cloudflareCredentials: {
+          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+        },
+        env: { ...baseEnv, ...config.verifyEnv },
+        config: {
+          timeout: VERIFY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: VERIFY_COMMAND_TIMEOUT_MS,
+        },
+      });
+    }
     await scheduler.completeClaim(String(repo), branchKey, _event.instanceId);
   }
 }
