@@ -70,7 +70,7 @@ const buildCleanupCommand =
 export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
   protected async pipeline(
     _event: WorkflowEvent<CiParams<CloudflareArtifacts>>,
-    _step: WorkflowStep,
+    step: WorkflowStep,
     ci: CiContext
   ): Promise<void> {
     const repo = _event.payload.repo;
@@ -88,21 +88,36 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     // last claim wins atomically and losers exit before spending a
     // container-minute. Re-checked between steps so a newer push also stops
     // a stale run already past the gate.
-    const scheduler = this.env.CI_SCHEDULER.get(
-      this.env.CI_SCHEDULER.idFromName("global")
-    );
+    // Scheduler calls in the workflow body must ride step.do: a bare RPC that
+    // lands while the DO's isolate is being recycled fails with "this Durable
+    // Object instance is no longer active" and — outside a step — kills the
+    // whole run on the spot. As named steps they retry like the runners do and
+    // their verdict is persisted, so hibernation/replay stays consistent.
+    // A fresh stub per attempt reconnects instead of reusing the dead session.
+    const scheduler = () =>
+      this.env.CI_SCHEDULER.get(this.env.CI_SCHEDULER.idFromName("global"));
+    const withScheduler = <T extends Rpc.Serializable<T>>(
+      name: string,
+      fn: (stub: ReturnType<typeof scheduler>) => Promise<T>
+    ): Promise<T> =>
+      step.do(
+        name,
+        {
+          retries: { limit: 5, delay: 5_000, backoff: "linear" },
+          timeout: 60_000,
+        },
+        () => fn(scheduler())
+      );
     const branchKey = String(branch ?? _event.payload.sha ?? "detached");
-    const supersededBy = async (): Promise<string | null> => {
-      const claim = await scheduler.getClaim(String(repo), branchKey);
-      return claim && claim.instanceId !== _event.instanceId
-        ? claim.instanceId
-        : null;
-    };
-    const claimed = await scheduler.claim(
-      String(repo),
-      branchKey,
-      _event.instanceId,
-      _event.payload.sha
+    const supersededBy = (name: string): Promise<string | null> =>
+      withScheduler(name, async (stub) => {
+        const claim = await stub.getClaim(String(repo), branchKey);
+        return claim && claim.instanceId !== _event.instanceId
+          ? claim.instanceId
+          : null;
+      });
+    const claimed = await withScheduler("dedupe-claim", (stub) =>
+      stub.claim(String(repo), branchKey, _event.instanceId, _event.payload.sha)
     );
     if (!claimed) {
       console.log(
@@ -112,8 +127,8 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     }
     // Duplicate events fan out over seconds — let a tight burst settle so a
     // slightly-later claim can supersede before we spawn anything.
-    await new Promise((r) => setTimeout(r, 2000));
-    let winner = await supersededBy();
+    await step.sleep("dedupe-settle", 2_000);
+    let winner = await supersededBy("dedupe-check");
     if (winner) {
       console.log(
         `[cloudflare-ci] superseded by ${winner} for ${String(repo)}@${branchKey} — exiting before any container spawn`
@@ -165,7 +180,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       },
     });
 
-    winner = await supersededBy();
+    winner = await supersededBy("dedupe-recheck");
     if (winner) {
       console.log(`[cloudflare-ci] superseded by ${winner} after build — skipping terminal steps`);
       return;
@@ -204,7 +219,10 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           },
         });
       }
-      await scheduler.completeClaim(String(repo), branchKey, _event.instanceId);
+      await withScheduler("dedupe-complete", async (stub) => {
+        await stub.completeClaim(String(repo), branchKey, _event.instanceId);
+        return null;
+      });
       return;
     }
 
@@ -273,6 +291,9 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         },
       });
     }
-    await scheduler.completeClaim(String(repo), branchKey, _event.instanceId);
+    await withScheduler("dedupe-complete", async (stub) => {
+      await stub.completeClaim(String(repo), branchKey, _event.instanceId);
+      return null;
+    });
   }
 }
