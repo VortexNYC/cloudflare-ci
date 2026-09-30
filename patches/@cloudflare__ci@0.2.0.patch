@@ -79,10 +79,10 @@ index aa6068d5ab399caf3f018e5c7c4a691da57931a7..6a099012bf44e7f529e25328d4eb1273
    ttlSeconds?: number;
  };
 diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
-index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedce08f5c19 100644
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..1e2c6cbf9e278a2b04382b261397c848bd31b2c3 100644
 --- a/src/ci/runners/sandbox.ts
 +++ b/src/ci/runners/sandbox.ts
-@@ -17,13 +17,46 @@ const WORKSPACE_DIR = '/workspace';
+@@ -17,13 +17,51 @@ const WORKSPACE_DIR = '/workspace';
  const STDOUT_FILE = '/tmp/ci-step.out';
  const STDERR_FILE = '/tmp/ci-step.err';
  const COMMAND_TIMEOUT_MS = 11 * 60 * 1000;
@@ -108,6 +108,11 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
 +// How long a step may wait for sandbox capacity before failing. Long enough
 +// to ride out a sibling run's step, short enough to surface real saturation.
 +const ADMIT_TIMEOUT_MS = 10 * 60 * 1000;
++// destroy() has no internal bound — a wedged containers control plane would
++// hold the step (and its caller's RPC) open until the step timeout. On
++// timeout the reservation stays on the scheduler ledger so the stale reaper
++// retries the teardown instead of silently leaking the slot.
++const DESTROY_TIMEOUT_MS = 60 * 1000;
 +
 +// Structural type for the worker's CI_SCHEDULER durable object — this package
 +// can't import the host worker's DO class.
@@ -130,7 +135,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
  
  export class SandboxRunner implements Runner<DirectoryBackup> {
    readonly name = 'sandbox';
-@@ -38,22 +71,56 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -38,22 +76,68 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
    async run(
      input: RunStepInput & { restore?: DirectoryBackup }
    ): Promise<RunStepResult<DirectoryBackup>> {
@@ -149,19 +154,31 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
 +    const scheduler = getScheduler(this.env);
 +    if (scheduler) {
 +      const deadline = Date.now() + ADMIT_TIMEOUT_MS;
++      const backoff = () =>
++        new Promise((resolve) =>
++          setTimeout(resolve, 2000 + Math.random() * 3000)
++        );
 +      for (;;) {
-+        const verdict = await scheduler.admit({
-+          pool,
-+          name: runnerName,
-+          instanceId: input.instanceId,
-+        });
++        let verdict;
++        try {
++          verdict = await scheduler.admit({
++            pool,
++            name: runnerName,
++            instanceId: input.instanceId,
++          });
++        } catch (error) {
++          // A scheduler DO recycled mid-call reports "this Durable Object
++          // instance is no longer active" — admission is idempotent, so retry
++          // within the same budget instead of failing the whole step.
++          if (Date.now() >= deadline) throw error;
++          await backoff();
++          continue;
++        }
 +        if (verdict.ok) break;
 +        if (Date.now() >= deadline) {
 +          throw new Error(`sandbox admission timed out: ${verdict.reason}`);
 +        }
-+        await new Promise((resolve) =>
-+          setTimeout(resolve, 2000 + Math.random() * 3000)
-+        );
++        await backoff();
 +      }
 +    }
 +    const sandbox = getSandbox(
@@ -198,7 +215,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
          // Overlay (no rm) so cached node_modules survive while tracked source
          // files are refreshed to this commit. The restored archive may carry a
          // different commit's source (e.g. a reused install cache), so this is
-@@ -67,12 +134,14 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -67,12 +151,14 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
              env: checkoutSourceEnv(input.source),
            }
          );
@@ -213,7 +230,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
        }
  
        const proc = await sandbox.startProcess(
-@@ -86,22 +155,40 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -86,22 +172,40 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
            autoCleanup: false,
          }
        );
@@ -264,7 +281,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
        const rawLogs = await readLogs(sandbox);
        const streams = [rawLogs.stdout, rawLogs.stderr].filter(
          (value): value is ReadableStream<Uint8Array> =>
-@@ -115,7 +202,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -115,7 +219,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
        const releaseStream = async () => {
          remainingStreams -= 1;
          if (remainingStreams === 0) {
@@ -273,7 +290,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
          }
        };
        cleanupTransferredToStreams = true;
-@@ -136,7 +223,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -136,7 +240,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
        };
      } finally {
        if (!cleanupTransferredToStreams) {
@@ -282,7 +299,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
        }
      }
    }
-@@ -204,9 +291,14 @@ function withCleanup(
+@@ -204,9 +308,14 @@ function withCleanup(
  ) {
    const reader = stream.getReader();
    let released = false;
@@ -297,7 +314,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
        await release();
      }
    };
-@@ -239,10 +331,25 @@ function createRunnerId(label: string) {
+@@ -239,10 +348,35 @@ function createRunnerId(label: string) {
    return `${slugify(label).slice(0, 16)}-${crypto.randomUUID()}`;
  }
  
@@ -308,12 +325,23 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
 +  runnerName?: string
 +) {
 +  let destroyed = false;
++  let timer: ReturnType<typeof setTimeout> | undefined;
    try {
-     await sandbox.destroy();
-+    destroyed = true;
+-    await sandbox.destroy();
++    destroyed = await Promise.race([
++      sandbox.destroy().then(() => true as const),
++      new Promise<false>((resolve) => {
++        timer = setTimeout(() => resolve(false), DESTROY_TIMEOUT_MS);
++      }),
++    ]);
++    if (!destroyed) {
++      console.error('Timed out destroying CI sandbox', { runnerName });
++    }
    } catch (error) {
      console.error('Failed to destroy CI sandbox', { error });
-   }
++  } finally {
++    clearTimeout(timer);
++  }
 +  // Release on successful destroy; on failure keep the reservation so the
 +  // stale reaper retries instead of silently leaking the slot.
 +  if (destroyed && scheduler && runnerName) {
@@ -322,7 +350,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4ce16eee20ace80cc459c3bee737bedc
 +    } catch {
 +      // stale reservation is reaped by age
 +    }
-+  }
+   }
  }
 diff --git a/src/ci/step-notification.ts b/src/ci/step-notification.ts
 index 2d70c69e664aa3083fec8346bd51ca2d41101cdc..24e81dbae7f86541a690ebf8a49588bf5d81ad3e 100644

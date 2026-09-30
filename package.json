@@ -7,7 +7,8 @@
     "deploy": "wrangler deploy",
     "typecheck": "wrangler types --path ./src/worker-configuration.d.ts && tsc --noEmit",
     "types": "wrangler types --path ./src/worker-configuration.d.ts",
-    "logs": "node scripts/get-logs.mjs"
+    "logs": "node scripts/get-logs.mjs",
+    "test": "node --experimental-transform-types --import ./test/setup.mjs --test \"test/*.test.ts\""
   },
   "dependencies": {
     "@cloudflare/ci": "0.2.0",

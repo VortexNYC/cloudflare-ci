@@ -25,6 +25,12 @@ repo or its entry in `src/repos.ts`.
     newest-wins dedupe. A `completed` same-sha claim rejects late
     duplicate events (they arrive minutes late) before any container
     spawns. `completeClaim` marks the winner done at pipeline end.
+    All scheduler calls from the workflow body run as `dedupe-*`
+    `step.do` steps — a DO isolate recycled mid-RPC reports
+    "this Durable Object instance is no longer active", and an
+    unprotected body call kills the whole run on the first blip.
+    `reapStale` bounds each teardown (30s) and the pass overall (90s):
+    a wedged `destroy()` must not stall the ledger.
 - Snapshots: each non-terminal step squashfs-archives `/workspace` to R2
   (`backups/<id>/`). Restores download over HTTP from
   `GET /admin/backup/:id` (Range-supported, parallel-part curl) — never
@@ -60,7 +66,9 @@ package without re-reviewing these will silently reintroduce the bugs:
 - `@cloudflare/ci@0.2.0` (`patches/@cloudflare__ci@0.2.0.patch`):
   `SOURCE_TIMEOUT_MS` 5m→15m + per-phase logs; `CiScheduler` admission
   before `getSandbox` + `release` on destroy; `instanceId` threaded to the
-  runner; log-stream watchdog/drain deadline; upload backpressure.
+  runner; log-stream watchdog/drain deadline; upload backpressure;
+  `admit` retries transient DO teardowns inside the admission budget;
+  `destroySandbox` bounds `destroy()` at 60s.
 - `@cloudflare/sandbox@0.12.1` (`patches/@cloudflare__sandbox.patch`,
   dist-level): local-bucket restore downloads the archive over HTTP from
   `BACKUP_DOWNLOAD_BASE_URL` with parallel ranged `curl` parts, verifies

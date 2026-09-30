@@ -14,6 +14,15 @@ const POOL_LIMITS: Record<PoolName, number> = {
 // command timeout + slack. Anything older is a corpse from a dead run.
 const RESERVATION_STALE_MS = 60 * 60 * 1000;
 
+// One teardown can hang when the containers control plane is unresponsive —
+// destroy() has no internal timeout. An unbounded await here keeps the
+// admit/sweep request open long enough that the isolate can be recycled with
+// callers queued behind it, which is how "this Durable Object instance is no
+// longer active" reached runs between steps. Bound each destroy and cap the
+// whole pass; leftovers retry on the next admit or the hourly sweep.
+const REAP_DESTROY_TIMEOUT_MS = 30 * 1000;
+const REAP_BUDGET_MS = 90 * 1000;
+
 export type Reservation = {
   name: string;
   pool: PoolName;
@@ -46,21 +55,50 @@ export class CiScheduler extends DurableObject<Bindings> {
     return [...map.values()];
   }
 
+  // Overridable so tests can shrink the per-destroy bound.
+  protected reapDestroyTimeoutMs = REAP_DESTROY_TIMEOUT_MS;
+
   private async reapStale(): Promise<string[]> {
     const stale = (await this.reservations()).filter(
       (r) => Date.now() - r.createdAt > RESERVATION_STALE_MS
     );
+    const deadline = Date.now() + REAP_BUDGET_MS;
     const reaped: string[] = [];
     for (const r of stale) {
-      try {
-        await getSandbox(this.env[r.pool], r.name).destroy();
-      } catch {
-        // already gone — the reservation is the only thing left to drop
-      }
+      if (Date.now() >= deadline) break;
+      if (!(await this.reapReservation(r))) continue;
       await this.ctx.storage.delete(`resv/${r.name}`);
       reaped.push(r.name);
     }
     return reaped;
+  }
+
+  /**
+   * Destroys one stale sandbox within the reap bound. Returns false only on
+   * timeout — the container may still be alive, so the reservation stays on
+   * the ledger (still counts against the pool) for the next pass to retry.
+   * Errors mean the sandbox is already gone: the reservation is the only
+   * thing left to drop.
+   */
+  private async reapReservation(r: Reservation): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        getSandbox(this.env[r.pool], r.name)
+          .destroy()
+          .then(() => true as const),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(
+            () => resolve(false),
+            this.reapDestroyTimeoutMs
+          );
+        }),
+      ]);
+    } catch {
+      return true;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async admit(input: {
