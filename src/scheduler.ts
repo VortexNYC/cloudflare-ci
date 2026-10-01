@@ -3,13 +3,20 @@ import { getSandbox } from "@cloudflare/sandbox";
 import type { CiParams, CloudflareArtifacts } from "@cloudflare/ci";
 import type { Bindings } from "./env";
 
-export type PoolName = "SANDBOX" | "SANDBOX_LITE";
+export type PoolName = "SANDBOX" | "SANDBOX_LITE" | "EXTERNAL";
 
 // Per-app container caps — must match max_instances in wrangler.jsonc.
+// EXTERNAL is the shared ledger for demand outside this worker (Pile lane
+// sandboxes): they admit here too so one DO sees total container pressure.
 const POOL_LIMITS: Record<PoolName, number> = {
   SANDBOX: 10,
   SANDBOX_LITE: 10,
+  EXTERNAL: 16,
 };
+
+// External consumers can't be destroyed through our sandbox bindings — their
+// leases self-expire so a crashed caller can't hold a slot forever.
+const EXTERNAL_LEASE_MS = 15 * 60 * 1000;
 
 // Longest a live step can hold a slot: ~15min source checkout + 30min
 // command timeout + slack. Anything older is a corpse from a dead run.
@@ -29,6 +36,8 @@ export type Reservation = {
   pool: PoolName;
   instanceId?: string;
   createdAt: number;
+  /** External leases carry an expiry — the caller's sandbox isn't ours to destroy. */
+  expiresAt?: number;
 };
 
 export type RunClaim = {
@@ -64,8 +73,21 @@ export class CiScheduler extends DurableObject<Bindings> {
   protected reapDestroyTimeoutMs = REAP_DESTROY_TIMEOUT_MS;
 
   private async reapStale(): Promise<string[]> {
+    // External leases expire on their TTL — the caller owns the container,
+    // so an expiry only releases the ledger slot.
+    const now = Date.now();
+    for (const r of await this.reservations()) {
+      if (r.pool === "EXTERNAL" && r.expiresAt && r.expiresAt <= now) {
+        await this.ctx.storage.delete(`resv/${r.name}`);
+      }
+    }
+    return this.reapStaleInternal();
+  }
+
+  private async reapStaleInternal(): Promise<string[]> {
     const stale = (await this.reservations()).filter(
-      (r) => Date.now() - r.createdAt > RESERVATION_STALE_MS
+      (r) =>
+        r.pool !== "EXTERNAL" && Date.now() - r.createdAt > RESERVATION_STALE_MS
     );
     const deadline = Date.now() + REAP_BUDGET_MS;
     const reaped: string[] = [];
@@ -110,6 +132,7 @@ export class CiScheduler extends DurableObject<Bindings> {
     pool: PoolName;
     name: string;
     instanceId?: string;
+    ttlMs?: number;
   }): Promise<AdmitResult> {
     // Reap before deciding — dead reservations shouldn't deny live work.
     await this.reapStale();
@@ -127,8 +150,13 @@ export class CiScheduler extends DurableObject<Bindings> {
       };
     }
     await this.ctx.storage.put(`resv/${input.name}`, {
-      ...input,
+      pool: input.pool,
+      name: input.name,
+      instanceId: input.instanceId,
       createdAt: Date.now(),
+      ...(input.pool === "EXTERNAL"
+        ? { expiresAt: Date.now() + (input.ttlMs ?? EXTERNAL_LEASE_MS) }
+        : {}),
     });
     return { ok: true };
   }
@@ -213,7 +241,7 @@ export class CiScheduler extends DurableObject<Bindings> {
       const status = await this.instanceStatus(r.instanceId);
       if (!status || status === "running" || status === "queued" || status === "paused") continue;
       try {
-        await getSandbox(this.env[r.pool], r.name).destroy();
+        await getSandbox(this.env[r.pool as 'SANDBOX' | 'SANDBOX_LITE'], r.name).destroy();
       } catch {
         // already gone — the reservation is the only thing left to drop
       }

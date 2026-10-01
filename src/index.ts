@@ -181,6 +181,44 @@ async function handleSandboxSweep(
   return Response.json(await scheduler(env).sweep());
 }
 
+async function handleSandboxAdmit(
+  request: Request,
+  env: Bindings
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers.get("authorization")?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const body = (await request.json().catch(() => ({}))) as {
+    name?: string;
+    pool?: string;
+    ttlMs?: number;
+  };
+  if (!body.name) return new Response("name required", { status: 400 });
+  const verdict = await scheduler(env).admit({
+    pool: body.pool === "EXTERNAL" ? "EXTERNAL" : "EXTERNAL",
+    name: body.name,
+    ttlMs: typeof body.ttlMs === "number" ? body.ttlMs : undefined,
+  });
+  return Response.json(verdict, { status: verdict.ok ? 200 : 429 });
+}
+
+async function handleSandboxRelease(
+  request: Request,
+  env: Bindings
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers.get("authorization")?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const body = (await request.json().catch(() => ({}))) as { name?: string };
+  if (!body.name) return new Response("name required", { status: 400 });
+  await scheduler(env).release(body.name);
+  return Response.json({ ok: true });
+}
+
 export default {
   fetch(request: Request, env: Bindings) {
     const { pathname } = new URL(request.url);
@@ -196,6 +234,15 @@ export default {
     }
     if (pathname === "/admin/sandbox/sweep" && request.method === "POST") {
       return handleSandboxSweep(request, env);
+    }
+    // Shared container admission: external consumers (Pile lane sandboxes)
+    // reserve a slot here before spawning so one ledger sees account-wide
+    // container pressure — the 503 saturation loop can't hide between apps.
+    if (pathname === "/admin/sandbox/admit" && request.method === "POST") {
+      return handleSandboxAdmit(request, env);
+    }
+    if (pathname === "/admin/sandbox/release" && request.method === "POST") {
+      return handleSandboxRelease(request, env);
     }
     return new Response("cloudflare-ci", { status: 200 });
   },
