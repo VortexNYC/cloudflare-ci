@@ -117,7 +117,13 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           : null;
       });
     const claimed = await withScheduler("dedupe-claim", (stub) =>
-      stub.claim(String(repo), branchKey, _event.instanceId, _event.payload.sha)
+      stub.claim(
+        String(repo),
+        branchKey,
+        _event.instanceId,
+        _event.payload.sha,
+        _event.payload
+      )
     );
     if (!claimed) {
       console.log(

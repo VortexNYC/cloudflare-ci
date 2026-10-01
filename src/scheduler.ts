@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { getSandbox } from "@cloudflare/sandbox";
+import type { CiParams, CloudflareArtifacts } from "@cloudflare/ci";
 import type { Bindings } from "./env";
 
 export type PoolName = "SANDBOX" | "SANDBOX_LITE";
@@ -33,8 +34,12 @@ export type Reservation = {
 export type RunClaim = {
   instanceId: string;
   sha?: string;
-  status: "running" | "completed";
+  status: "running" | "completed" | "errored";
   at: number;
+  /** Original event payload — lets the sweeper re-fire an errored run. */
+  params?: CiParams<CloudflareArtifacts>;
+  /** Re-fire attempts so a persistently-failing push doesn't loop forever. */
+  refires?: number;
 };
 
 type AdmitResult = { ok: true } | { ok: false; reason: string };
@@ -141,7 +146,8 @@ export class CiScheduler extends DurableObject<Bindings> {
     repo: string,
     branch: string,
     instanceId: string,
-    sha?: string
+    sha?: string,
+    params?: CiParams<CloudflareArtifacts>
   ): Promise<boolean> {
     const existing = await this.getClaim(repo, branch);
     if (
@@ -157,6 +163,7 @@ export class CiScheduler extends DurableObject<Bindings> {
       sha,
       status: "running",
       at: Date.now(),
+      params,
     } satisfies RunClaim);
     return true;
   }
@@ -183,11 +190,93 @@ export class CiScheduler extends DurableObject<Bindings> {
     }
   }
 
+  private async instanceStatus(instanceId: string): Promise<string | null> {
+    try {
+      const instance = await this.env.CI_WORKFLOW.get(instanceId);
+      const status = await instance.status();
+      return typeof status === "string" ? status : (status.status ?? null);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Reservations orphaned by a dead run — the workflow errored/terminated so
+   * its runner finally never ran and the container never released. The age
+   * window (reapStale) is for runs still executing; a dead run's slot is
+   * reclaimable immediately.
+   */
+  private async reapDeadRuns(): Promise<string[]> {
+    const reaped: string[] = [];
+    for (const r of await this.reservations()) {
+      if (!r.instanceId) continue;
+      const status = await this.instanceStatus(r.instanceId);
+      if (!status || status === "running" || status === "queued" || status === "paused") continue;
+      try {
+        await getSandbox(this.env[r.pool], r.name).destroy();
+      } catch {
+        // already gone — the reservation is the only thing left to drop
+      }
+      await this.ctx.storage.delete(`resv/${r.name}`);
+      reaped.push(r.name);
+    }
+    return reaped;
+  }
+
+  /**
+   * A claim stuck "running" whose workflow instance is dead = a pipeline that
+   * died mid-flight. Mark it errored, free its reservations, and re-fire
+   * main-branch runs once — an errored deploy otherwise leaves prod stale
+   * until the next push.
+   */
+  private async reconcileClaims(): Promise<{ refired: string[] }> {
+    const refired: string[] = [];
+    const claims = await this.ctx.storage.list<RunClaim>({ prefix: "claim/" });
+    for (const [key, claim] of claims) {
+      if (claim.status !== "running") continue;
+      const status = await this.instanceStatus(claim.instanceId);
+      if (!status || status === "running" || status === "queued" || status === "paused") continue;
+      const branch = key.slice("claim/".length).split("/").slice(1).join("/");
+      if (branch !== "main") {
+        await this.ctx.storage.put(key, { ...claim, status: "errored" });
+        continue;
+      }
+      if ((claim.refires ?? 0) >= 1 || !claim.params) {
+        await this.ctx.storage.put(key, { ...claim, status: "errored" });
+        continue;
+      }
+      try {
+        const created = await this.env.CI_WORKFLOW.create({
+          params: claim.params,
+        });
+        await this.ctx.storage.put(key, {
+          ...claim,
+          instanceId: created.id,
+          refires: (claim.refires ?? 0) + 1,
+          at: Date.now(),
+        });
+        refired.push(key);
+      } catch {
+        await this.ctx.storage.put(key, { ...claim, status: "errored" });
+      }
+    }
+    return { refired };
+  }
+
   async sweep(): Promise<{
     reaped: string[];
+    deadReaped: string[];
+    refired: string[];
     reservations: Reservation[];
   }> {
     const reaped = await this.reapStale();
-    return { reaped, reservations: await this.reservations() };
+    const deadReaped = await this.reapDeadRuns();
+    const { refired } = await this.reconcileClaims();
+    return {
+      reaped,
+      deadReaped,
+      refired,
+      reservations: await this.reservations(),
+    };
   }
 }
