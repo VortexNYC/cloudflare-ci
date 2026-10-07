@@ -69,10 +69,15 @@ package without re-reviewing these will silently reintroduce the bugs:
   runner; log-stream watchdog/drain deadline; upload backpressure;
   `admit` retries transient DO teardowns inside the admission budget;
   `destroySandbox` bounds `destroy()` at 60s.
-- `@cloudflare/sandbox@0.12.1` (`patches/@cloudflare__sandbox.patch`,
+- `@cloudflare/sandbox@0.12.10` (`patches/@cloudflare__sandbox@0.12.10.patch`,
   dist-level): local-bucket restore downloads the archive over HTTP from
   `BACKUP_DOWNLOAD_BASE_URL` with parallel ranged `curl` parts, verifies
-  size, falls back to the old DO stream if unset.
+  size, falls back to the old DO stream if unset; `asyncIterableToSSEStream`
+  and the backup-create `sseDecoded` stream use `pull()` so consumers apply
+  backpressure instead of draining the source eagerly. `@cloudflare/ci`
+  pins `0.12.1` internally, so `pnpm-workspace.yaml` carries an
+  `overrides` entry forcing every resolution to the patched 0.12.10 —
+  without it the DO code keeps running unpatched 0.12.1.
 
 Workflow: `pnpm patch <pkg>` → edit → `pnpm patch-commit <dir>` →
 `pnpm install` → deploy. Long-term these belong upstream; file them
