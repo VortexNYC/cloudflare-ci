@@ -85,8 +85,10 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       VP_GIT_HOOKS: "0",
     },
     // typecheck here is a build-input gate for deploy, not a test — vitest
-    // runs in the pre-push hook locally.
-    buildCommand: "pnpm exec vp run typecheck",
+    // runs in the pre-push hook locally. The wrangler.toml assets.directory
+    // (apps/web/dist — PILE-332 member console) must exist before deploy.
+    buildCommand:
+      "pnpm exec vp run typecheck && pnpm -C apps/web run build",
     deployCommand: "pnpm exec wrangler deploy -e production",
     verifyCommand: 'curl -fsS --max-time 15 https://pile.nyc/health',
     d1Database: "pile-global",
