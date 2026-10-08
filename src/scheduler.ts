@@ -111,7 +111,7 @@ export class CiScheduler extends DurableObject<Bindings> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        getSandbox(this.env[r.pool], r.name)
+        getSandbox(this.env[r.pool as "SANDBOX" | "SANDBOX_LITE"], r.name)
           .destroy()
           .then(() => true as const),
         new Promise<false>((resolve) => {

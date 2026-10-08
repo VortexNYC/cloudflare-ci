@@ -1,8 +1,8 @@
-diff --git a/dist/sandbox-DKG3H156.js b/dist/sandbox-DKG3H156.js
-index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..064719dfdc28e483d7ec9d283af228014d253608 100644
---- a/dist/sandbox-DKG3H156.js
-+++ b/dist/sandbox-DKG3H156.js
-@@ -3514,25 +3514,33 @@ async function* responseToAsyncIterable(response, signal) {
+diff --git a/dist/sandbox-Co2NYKhX.js b/dist/sandbox-Co2NYKhX.js
+index 02ceabedb22912bc7a56a0f9d483543bde5fae49..ed55db368d33ae67ad6973d2a18c24b846d51ed7 100644
+--- a/dist/sandbox-Co2NYKhX.js
++++ b/dist/sandbox-Co2NYKhX.js
+@@ -4665,25 +4665,33 @@ async function* responseToAsyncIterable(response, signal) {
  function asyncIterableToSSEStream(events, options) {
  	const encoder = new TextEncoder();
  	const serialize = options?.serialize || JSON.stringify;
@@ -23,7 +23,8 @@ index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..064719dfdc28e483d7ec9d283af22801
 +					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 +					controller.close();
 +					return;
-+				}
+ 				}
+-				controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 +				const { done: iterDone, value } = await iterator.next();
 +				if (iterDone || options?.signal?.aborted) {
 +					if (options?.signal?.aborted && !iterDone) await iterator.return?.();
@@ -31,8 +32,7 @@ index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..064719dfdc28e483d7ec9d283af22801
 +					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 +					controller.close();
 +					return;
- 				}
--				controller.enqueue(encoder.encode("data: [DONE]\n\n"));
++				}
 +				controller.enqueue(encoder.encode(`data: ${serialize(value)}\n\n`));
  			} catch (error) {
  				controller.error(error);
@@ -48,7 +48,7 @@ index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..064719dfdc28e483d7ec9d283af22801
  	});
  }
  
-@@ -9568,10 +9576,20 @@ var Sandbox = class Sandbox extends Container {
+@@ -11127,10 +11135,20 @@ var Sandbox = class Sandbox extends Container {
  			const r2Key = `${BACKUP_STORAGE_PREFIX}/${backupId}/${BACKUP_ARCHIVE_OBJECT_NAME}`;
  			const metaKey = `${BACKUP_STORAGE_PREFIX}/${backupId}/${BACKUP_METADATA_OBJECT_NAME}`;
  			const archiveStream = await this.client.files.readFileStream(archivePath, backupSession);
@@ -72,7 +72,7 @@ index ac1c6e0ad92f2471ea9fc4352a14ad916ed216a8..064719dfdc28e483d7ec9d283af22801
  				} catch (err) {
  					controller.error(err);
  				}
-@@ -9858,18 +9876,49 @@ var Sandbox = class Sandbox extends Container {
+@@ -11436,18 +11454,49 @@ var Sandbox = class Sandbox extends Container {
  			const archivePath = `${BACKUP_CONTAINER_DIR}/${id}.sqsh`;
  			await this.execWithSession(`mkdir -p ${BACKUP_CONTAINER_DIR}`, backupSession, { origin: "internal" });
  			if (this.transport === "rpc") {
