@@ -56,7 +56,9 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     buildCommand,
     deployCommand:
       "(cd apps/anydoc-worker && pnpm exec wrangler deploy -e production) && " +
-      "(cd apps/convert-worker && pnpm exec wrangler deploy -e production) && " +
+      // PATCH /containers/applications rejects API tokens (workers-sdk#14741).
+      // Worker code still ships; image rollouts stay a local `wrangler deploy`.
+      "(cd apps/convert-worker && pnpm exec wrangler deploy -e production --containers-rollout=none) && " +
       "(cd apps/api && pnpm exec wrangler deploy -e production) && " +
       "(cd apps/mcp-worker && pnpm exec wrangler deploy -e production) && " +
       "(cd apps/web && pnpm exec wrangler deploy -e production) && " +
