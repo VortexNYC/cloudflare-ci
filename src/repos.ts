@@ -90,6 +90,11 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     buildCommand:
       "pnpm exec vp run typecheck && pnpm -C apps/web run build",
     deployCommand: "pnpm exec wrangler deploy -e production",
+    // versions upload, not deploy: preview versions never consume
+    // webhook-queue or fire crons, so a branch preview cannot steal prod
+    // traffic. Requires workers_dev=true on env.production (PILE-344).
+    previewCommand:
+      'pnpm exec wrangler versions upload -e production --preview-alias "$CI_PREVIEW_ALIAS"',
     verifyCommand: 'curl -fsS --max-time 15 https://pile.nyc/health',
     d1Database: "pile-global",
     d1MigrationsCwd: ".",
