@@ -10,4 +10,8 @@ export type Bindings = CiBindings & {
   ADMIN_TOKEN?: string;
   SANDBOX_LITE: DurableObjectNamespace<CiSandbox>;
   CI_SCHEDULER: DurableObjectNamespace<CiScheduler>;
+  /** Failure self-report — errored claims file a Pile issue. Optional. */
+  PILE_BASE_URL?: string;
+  PILE_API_KEY?: string;
+  PILE_WORKSPACE?: string;
 };

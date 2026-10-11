@@ -222,6 +222,46 @@ export class CiScheduler extends DurableObject<Bindings> {
     }
   }
 
+  /**
+   * Failures file themselves — a dead/errored claim posts a Pile issue in
+   * the workspace so the team sees it where they work, not in wrangler
+   * output nobody reads. Optional: no PILE_API_KEY → silent skip.
+   */
+  private async reportClaimFailure(
+    repoBranch: string,
+    claim: RunClaim,
+    reason: string
+  ): Promise<void> {
+    const baseUrl = this.env.PILE_BASE_URL as string | undefined;
+    const apiKey = this.env.PILE_API_KEY as string | undefined;
+    const workspace = this.env.PILE_WORKSPACE as string | undefined;
+    if (!baseUrl || !apiKey || !workspace) return;
+    const [repo, ...rest] = repoBranch.split("/");
+    const branch = rest.join("/");
+    try {
+      await fetch(`${baseUrl}/workspaces/${workspace}/issues`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: `CI failed: ${repo}/${branch}`,
+          description: [
+            `cloudflare-ci run ${claim.instanceId} ${reason}.`,
+            `- sha: ${claim.sha ?? "unknown"}`,
+            `- branch: ${branch}`,
+            `- refires: ${claim.refires ?? 0}`,
+          ].join("\n"),
+          status: "triage",
+          priority: "high",
+        }),
+      });
+    } catch {
+      // reporting is best-effort — never block the ledger on Pile
+    }
+  }
+
   private async instanceStatus(instanceId: string): Promise<string | null> {
     try {
       const instance = await this.env.CI_WORKFLOW.get(instanceId);
@@ -321,10 +361,20 @@ export class CiScheduler extends DurableObject<Bindings> {
       const branch = key.slice("claim/".length).split("/").slice(1).join("/");
       if (branch !== "main") {
         await this.ctx.storage.put(key, { ...claim, status: "errored" });
+        await this.reportClaimFailure(
+          key.slice("claim/".length),
+          claim,
+          `ended as ${status}`
+        );
         continue;
       }
       if ((claim.refires ?? 0) >= 1 || !claim.params) {
         await this.ctx.storage.put(key, { ...claim, status: "errored" });
+        await this.reportClaimFailure(
+          key.slice("claim/".length),
+          claim,
+          `ended as ${status} (refire budget spent)`
+        );
         continue;
       }
       try {
@@ -343,6 +393,24 @@ export class CiScheduler extends DurableObject<Bindings> {
       }
     }
     return { refired };
+  }
+
+  /** One-call operator view: every claim with its live instance status
+   * plus the reservation ledger — "what's stuck" is a curl, not
+   * wrangler spelunking. */
+  async runsReport(): Promise<{
+    claims: { key: string; claim: RunClaim; instanceStatus: string | null }[];
+    reservations: Reservation[];
+  }> {
+    const claims = await this.ctx.storage.list<RunClaim>({ prefix: "claim/" });
+    const rows = await Promise.all(
+      [...claims].map(async ([key, claim]) => ({
+        key,
+        claim,
+        instanceStatus: await this.instanceStatus(claim.instanceId),
+      }))
+    );
+    return { claims: rows, reservations: await this.reservations() };
   }
 
   async sweep(): Promise<{

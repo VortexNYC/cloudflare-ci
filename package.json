@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
+    "deploy": "node scripts/deploy-guard.mjs && wrangler deploy",
     "typecheck": "wrangler types --path ./src/worker-configuration.d.ts && tsc --noEmit",
     "types": "wrangler types --path ./src/worker-configuration.d.ts",
     "logs": "node scripts/get-logs.mjs",

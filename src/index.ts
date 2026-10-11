@@ -3,6 +3,7 @@ import { getSandbox } from "@cloudflare/sandbox";
 
 import { CI } from "./ci";
 import type { Bindings } from "./env";
+import type { CiScheduler } from "./scheduler";
 
 // Same sandbox runtime on a smaller container instance_type, bound as
 // SANDBOX_LITE for steps that don't need a full build machine.
@@ -169,6 +170,19 @@ function scheduler(env: Bindings) {
   return env.CI_SCHEDULER.get(env.CI_SCHEDULER.idFromName("global"));
 }
 
+async function handleAdminJson(
+  request: Request,
+  env: Bindings,
+  fn: (stub: DurableObjectStub<CiScheduler>) => Promise<unknown>
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers.get("authorization")?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  return Response.json(await fn(scheduler(env)));
+}
+
 async function handleSandboxSweep(
   request: Request,
   env: Bindings
@@ -234,6 +248,9 @@ export default {
     }
     if (pathname === "/admin/sandbox/sweep" && request.method === "POST") {
       return handleSandboxSweep(request, env);
+    }
+    if (pathname === "/admin/runs" && request.method === "GET") {
+      return handleAdminJson(request, env, (scheduler) => scheduler.runsReport());
     }
     // Shared container admission: external consumers (Pile lane sandboxes)
     // reserve a slot here before spawning so one ledger sees account-wide
