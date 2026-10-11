@@ -9,8 +9,10 @@ export type StorageLike = {
 };
 
 export class DurableObject<Env = unknown> {
-  constructor(
-    protected ctx: { storage: StorageLike },
-    protected env: Env
-  ) {}
+  protected ctx: { storage: StorageLike };
+  protected env: Env;
+  constructor(ctx: { storage: StorageLike }, env: Env) {
+    this.ctx = ctx;
+    this.env = env;
+  }
 }

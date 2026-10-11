@@ -29,6 +29,10 @@ const RESERVATION_STALE_MS = 60 * 60 * 1000;
 // longer active" reached runs between steps. Bound each destroy and cap the
 // whole pass; leftovers retry on the next admit or the hourly sweep.
 const REAP_DESTROY_TIMEOUT_MS = 30 * 1000;
+// A running claim older than this is wedged — the platform never
+// reports it dead. 45min > 30min build step + deps + preview margins.
+const ZOMBIE_RUN_MS = 45 * 60_000;
+
 const REAP_BUDGET_MS = 90 * 1000;
 
 export type Reservation = {
@@ -257,9 +261,59 @@ export class CiScheduler extends DurableObject<Bindings> {
    * main-branch runs once — an errored deploy otherwise leaves prod stale
    * until the next push.
    */
+  /**
+   * A claim still "running" past the longest possible pipeline is a
+   * zombie — the platform keeps reporting "running" after the step's
+   * sandbox DO isolate dies, so reconcileClaims' status check never
+   * catches it. Age is the honest signal: kill the instance via the
+   * Workflows REST API and let the errored path below take over.
+   */
+  private async reapZombieClaims(claims: Map<string, RunClaim>): Promise<void> {
+    const token = this.env.CF_TOKEN as string | undefined;
+    for (const [key, claim] of claims) {
+      if (claim.status !== "running") continue;
+      if (Date.now() - claim.at < ZOMBIE_RUN_MS) continue;
+      const status = await this.instanceStatus(claim.instanceId);
+      if (status !== "running" && status !== "queued") continue;
+      // Free the run's containers first — a zombie can't release them.
+      for (const r of await this.reservations()) {
+        if (r.instanceId !== claim.instanceId) continue;
+        try {
+          await getSandbox(
+            this.env[r.pool as "SANDBOX" | "SANDBOX_LITE"],
+            r.name
+          ).destroy();
+        } catch {
+          // already gone
+        }
+        await this.ctx.storage.delete(`resv/${r.name}`);
+      }
+      if (token) {
+        try {
+          await fetch(
+            `https://api.cloudflare.com/client/v4/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workflows/cloudflare-ci/instances/${claim.instanceId}/status`,
+            {
+              method: "PATCH",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ status: "terminate" }),
+            }
+          );
+        } catch {
+          // best-effort — the claim still flips below
+        }
+      }
+      // Flip to errored so reconcileClaims' refire path treats it as dead.
+      await this.ctx.storage.put(key, { ...claim, status: "errored" });
+    }
+  }
+
   private async reconcileClaims(): Promise<{ refired: string[] }> {
     const refired: string[] = [];
     const claims = await this.ctx.storage.list<RunClaim>({ prefix: "claim/" });
+    await this.reapZombieClaims(claims);
     for (const [key, claim] of claims) {
       if (claim.status !== "running") continue;
       const status = await this.instanceStatus(claim.instanceId);

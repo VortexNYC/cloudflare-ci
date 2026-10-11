@@ -141,6 +141,55 @@ test("admit reaps stale entries and still reserves promptly", async () => {
   assert.equal((await scheduler.sweep()).reservations.length, 2);
 });
 
+test("zombie running claims are reaped by age and their containers freed", async () => {
+  const { scheduler, storage } = makeScheduler();
+  const zombieInstance = "zombie-1";
+  // platform keeps reporting "running" for a wedged step — age is the signal
+  (scheduler as never as { env: object }).env = {
+    ...((scheduler as never as { env: Record<string, unknown> }).env),
+    CI_WORKFLOW: {
+      get: async () => ({ status: async () => "running" }),
+      create: async () => ({ id: "refired" }),
+    },
+  };
+  await storage.put("claim/pile/feat-x", {
+    instanceId: zombieInstance,
+    sha: "abc",
+    status: "running",
+    at: Date.now() - 50 * 60_000,
+  });
+  await storage.put("resv/z-res", {
+    name: "z-res",
+    pool: "SANDBOX",
+    createdAt: Date.now(),
+    instanceId: zombieInstance,
+  });
+  await scheduler.sweep();
+  const claim = await storage.get<{ status: string }>("claim/pile/feat-x");
+  assert.equal(claim?.status, "errored");
+  assert.equal(await storage.get("resv/z-res"), undefined);
+});
+
+test("young running claims are left alone", async () => {
+  const { scheduler, storage } = makeScheduler();
+  (scheduler as never as { env: object }).env = {
+    ...((scheduler as never as { env: Record<string, unknown> }).env),
+    CI_WORKFLOW: {
+      get: async () => ({ status: async () => "running" }),
+      create: async () => ({ id: "refired" }),
+    },
+  };
+  await storage.put("claim/pile/feat-y", {
+    instanceId: "live-1",
+    sha: "abc",
+    status: "running",
+    at: Date.now() - 5 * 60_000,
+  });
+  await scheduler.sweep();
+  const claim = await storage.get<{ status: string }>("claim/pile/feat-y");
+  assert.equal(claim?.status, "running");
+});
+
 test("fresh reservations are never reaped", async () => {
   const { scheduler } = makeScheduler();
   await scheduler.admit({ pool: "SANDBOX", name: "live" });
