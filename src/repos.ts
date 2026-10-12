@@ -78,7 +78,12 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
   },
   pile: {
     name: "pile",
-    buildEnv: {},
+    buildEnv: {
+      // PostHog project key — client-public by design (phc_ prefix), baked
+      // into the SPA bundle by Vite at build time.
+      VITE_POSTHOG_KEY: "phc_v5HaYTE3N9siA53wtYmkFHSm28mBATJJsdDjeaobHxC8",
+      VITE_POSTHOG_HOST: "https://us.i.posthog.com",
+    },
     installEnv: {
       HOME: "/tmp",
       CI: "true",
