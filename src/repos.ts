@@ -92,9 +92,14 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     // typecheck here is a build-input gate for deploy, not a test — vitest
     // runs in the pre-push hook locally. The wrangler.toml assets.directory
     // (apps/web/dist — PILE-332 member console) must exist before deploy.
+    // docs.pile.nyc rides the same pipeline — blume builds the API reference
+    // from src/mcp/openapi.json, so it must redeploy whenever routes change.
+    // Build output (packages/docs/dist) persists in the step snapshot; the
+    // deploy step runs the worker deploy first so docs never lead prod.
     buildCommand:
-      "pnpm exec vp run typecheck && pnpm -C apps/web run build",
-    deployCommand: "pnpm exec wrangler deploy -e production",
+      "pnpm exec vp run typecheck && pnpm -C apps/web run build && pnpm -C packages/docs run build",
+    deployCommand:
+      "pnpm exec wrangler deploy -e production && pnpm -C packages/docs run deploy",
     // Version URLs aren't generated for DO workers, so previews are a real
     // second worker: staging.pile.nyc. env.staging shares prod data
     // bindings but has no queue consumer, no cron, no EMAIL — last branch

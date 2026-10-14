@@ -2,7 +2,7 @@
 // resets live sandbox DO isolates and strands every in-flight run as a
 // zombie (the 2026-10-11 wedge batch). Hits /admin/runs; ADMIN_TOKEN and
 // the worker URL come from env.
-const BASE = process.env.CI_WORKER_URL ?? "https://cloudflare-ci.shlomo-31b.workers.dev";
+const BASE = process.env.CI_WORKER_URL ?? "https://cloudflare-ci.vortex-nyc.workers.dev";
 const token = process.env.ADMIN_TOKEN;
 
 if (!token) {
