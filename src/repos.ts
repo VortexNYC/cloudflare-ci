@@ -89,6 +89,10 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       CI: "true",
       VP_GIT_HOOKS: "0",
     },
+    // blume's githubReleases source needs a repo-read token at build time —
+    // GITHUB_TOKEN on this worker is the read:packages PAT (releases are
+    // readable with it; verified against the pile releases API).
+    buildSecrets: ["GITHUB_TOKEN"],
     // typecheck here is a build-input gate for deploy, not a test — vitest
     // runs in the pre-push hook locally. The wrangler.toml assets.directory
     // (apps/web/dist — PILE-332 member console) must exist before deploy.

@@ -453,3 +453,59 @@ index a1f5ff3aa8c30350300f3bd8d1f25cbc850aff65..45a25b88517ae625e6e3c354bf9c6515
    cloudflareCredentials?: boolean | { accountId: string };
    // Inject provider-specific source-control credentials into the command env.
    sourceControlCredentials?: boolean;
+diff --git a/src/shared/source-checkout.ts b/src/shared/source-checkout.ts
+index f83770cfc430aacd3c257dc90e46ae8b2fa8be51..012c5143099fe35e322992d771abf0078eddd501 100644
+--- a/src/shared/source-checkout.ts
++++ b/src/shared/source-checkout.ts
+@@ -23,15 +23,43 @@ export function checkoutSourceScript(
+   if (source.kind === 'archive') {
+     return `${prepare} && curl --connect-timeout 10 --max-time 300 --fail --silent --show-error --location ${shellQuote(source.url)} | tar -xz --strip-components=1 -C ${shellQuote(workspace)}`;
+   }
+-  return [
++  const clone = shellQuote(CLONE_DIR);
++  const marker = `${shellQuote(workspace)}/.ci-source-sha`;
++  const lines = [
+     prepare,
+-    `rm -rf ${shellQuote(CLONE_DIR)}`,
+-    `git init -q ${shellQuote(CLONE_DIR)}`,
+-    `git -C ${shellQuote(CLONE_DIR)} remote add origin ${shellQuote(source.remote)}`,
+-    `git -c http.extraHeader="Authorization: Bearer $SOURCE_CONTROL_TOKEN" -C ${shellQuote(CLONE_DIR)} fetch --depth=1 origin ${shellQuote(source.sha)}`,
+-    `git -C ${shellQuote(CLONE_DIR)} checkout --detach FETCH_HEAD`,
+-    `tar --exclude=.git -C ${shellQuote(CLONE_DIR)} -cf - . | tar -C ${shellQuote(workspace)} -xf -`,
+-  ].join(' && ');
++    `rm -rf ${clone}`,
++    `git init -q ${clone}`,
++    `git -C ${clone} remote add origin ${shellQuote(source.remote)}`,
++    `git -c http.extraHeader="Authorization: Bearer $SOURCE_CONTROL_TOKEN" -C ${clone} fetch --depth=1 origin ${shellQuote(source.sha)}`,
++    `git -C ${clone} checkout --detach FETCH_HEAD`,
++  ];
++  if (overlay) {
++    // The restored snapshot carries a previous commit's tree; the tar overlay
++    // refreshes changed files but never removes them, so deleted sources
++    // linger forever. Two sync modes:
++    //   marker present — diff marker-sha..this-sha and remove deleted paths
++    //     (surgical: never touches generated output like dist/).
++    //   marker missing — bootstrap: reconcile the workspace to the clone's
++    //     tracked file set, pruning caches and build output dirs. Runs once
++    //     per snapshot; the marker then lands and later runs go surgical.
++    // Both non-fatal — a pruned sha or empty marker just skips the sync.
++    lines.push(
++      `if OLD_SHA=$(cat ${marker} 2>/dev/null) && ` +
++        `git -C ${clone} fetch -q --depth=1 origin "$OLD_SHA" 2>/dev/null; then ` +
++        `git -C ${clone} diff --name-only --diff-filter=D "$OLD_SHA" ${shellQuote(source.sha)} | ` +
++        `while IFS= read -r f; do rm -f "${shellQuote(workspace)}/$f"; done; ` +
++        `else ` +
++        `( cd ${clone} && find . -name .git -prune -o -type f -print | sed 's|^\\./||' | sort > /tmp/ci-expected ) && ` +
++        `( cd ${shellQuote(workspace)} && find . -name node_modules -prune -o -name .git -prune -o -name dist -prune -o -name .pnpm-store -prune -o -name .wrangler -prune -o -name .next -prune -o -name .output -prune -o -name .turbo -prune -o -name coverage -prune -o -type f -print | sed 's|^\\./||' | sort > /tmp/ci-present ) && ` +
++        `comm -23 /tmp/ci-present /tmp/ci-expected | while IFS= read -r f; do rm -f "${shellQuote(workspace)}/$f"; done; ` +
++        `fi || true`
++    );
++  }
++  lines.push(
++    `tar --exclude=.git -C ${clone} -cf - . | tar -C ${shellQuote(workspace)} -xf -`,
++    `printf '%s' ${shellQuote(source.sha)} > ${marker}`
++  );
++  return lines.join(' && ');
+ }
+ 
+ export function checkoutSourceEnv(source: SourceControlCheckout) {
