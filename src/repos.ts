@@ -169,7 +169,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
       'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +
       'service postgresql start && ' +
-      'su postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='"'"'vortex_dev'"'"'\" | grep -q 1 || createdb vortex_dev" && ' +
+      'su postgres -c "createdb vortex_dev" || true; ' +
       "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
     checks: [
       {
