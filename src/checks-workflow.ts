@@ -176,8 +176,9 @@ function buildRunScript(
   ];
   if (config.checksInstallCommand) {
     lines.push(
-      `{ ${config.checksInstallCommand}; }`,
-      "echo ===CI:INSTALL:RC=$?==="
+      `{ ${config.checksInstallCommand}; } > /tmp/install.out 2>&1`,
+      "rc=$?; tail -c 3500 /tmp/install.out",
+      "echo ===CI:INSTALL:RC=$rc==="
     );
   } else {
     lines.push("echo ===CI:INSTALL:RC=0===");
@@ -186,10 +187,15 @@ function buildRunScript(
     const exports = Object.entries(check.env ?? {})
       .map(([k, v]) => `export ${k}=${shellQuote(v)}`)
       .join("; ");
+    const outFile = `/tmp/check-${check.name}.out`;
+    // Check output goes to a file — the exec response caps buffered
+    // stdout and verbose suites (go test) eat the whole budget. Emit a
+    // bounded tail between markers instead.
     lines.push(
-      `echo ===CHECK:${check.name}:START===`,
-      exports ? `${exports}; ${check.command}` : check.command,
-      `echo ===CHECK:${check.name}:RC=$?===`
+      `{ ${exports ? exports + "; " : ""}${check.command}; } > ${outFile} 2>&1`,
+      `rc=$?; echo ===CHECK:${check.name}:START===`,
+      `tail -c 3500 ${outFile}`,
+      `echo ===CHECK:${check.name}:RC=$rc===`
     );
   }
   return lines.join("\n");
