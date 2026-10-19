@@ -168,6 +168,8 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     checksInstallCommand:
       '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
       'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +
+      'service postgresql start && ' +
+      'su postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='"'"'vortex_dev'"'"'\" | grep -q 1 || createdb vortex_dev" && ' +
       "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
     checks: [
       {
@@ -179,14 +181,35 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
           "--exclude-globs='node_modules/**,pnpm-lock.yaml'",
       },
       {
-        // The GHA gate: sdk:build + check + openapi:verify + contract:check.
-        // `vp run test` needs Postgres 16 — deferred until the image gets
-        // pg16 or a PlanetScale dev-branch secret is wired.
+        // The GHA verify job: sdk:build + check + openapi:verify +
+        // contract:check + lint:hazards + oxlint plugin + landing.
         name: "ci",
         command:
           "pnpm exec vp run sdk:build && pnpm exec vp check && " +
-          "pnpm exec vp run openapi:verify && pnpm exec vp run contract:check",
+          "pnpm exec vp run openapi:verify && pnpm exec vp run contract:check && " +
+          "pnpm exec vp run lint:hazards && pnpm exec vp run test:oxlint-plugin && " +
+          "pnpm exec vp run landing:typecheck && pnpm exec vp run landing:build && " +
+          "pnpm exec vp run -F ./apps/landing test",
         timeoutMs: 20 * 60 * 1000,
+      },
+      {
+        // The GHA test matrix ran against a postgres:16 service; the image
+        // carries pg16 and checksInstallCommand boots it + creates
+        // vortex_dev — same DATABASE_URL the suite expects.
+        name: "test",
+        command: "pnpm exec vp run test",
+        env: {
+          DATABASE_URL:
+            "postgresql://postgres:postgres@127.0.0.1:5432/vortex_dev",
+        },
+        timeoutMs: 30 * 60 * 1000,
+      },
+      {
+        // production-readiness.yml: MarinJursic prc scan — clones the pinned
+        // rev and builds with Go; image carries go1.27.
+        name: "prc",
+        command: "bash production-readiness/prc.sh",
+        timeoutMs: 15 * 60 * 1000,
       },
     ],
   },
