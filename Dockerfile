@@ -12,3 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
  && curl -fsSL "https://go.dev/dl/go1.24.5.linux-$(dpkg --print-architecture | sed 's/amd64/amd64/;s/arm64/arm64/').tar.gz" \
     -o /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
 ENV PATH="$PATH:/usr/local/go/bin:/root/go/bin"
+
+# trufflehog 3.97.1 — matches the version vortex's trufflehog.yml pins.
+RUN ARCH="$(dpkg --print-architecture | sed 's/amd64/amd64/;s/arm64/arm64/')"  && curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.1/trufflehog_3.97.1_linux_${ARCH}.tar.gz"     -o /tmp/trufflehog.tgz && tar -C /usr/local/bin -xzf /tmp/trufflehog.tgz trufflehog && rm /tmp/trufflehog.tgz
