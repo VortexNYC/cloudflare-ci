@@ -112,8 +112,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         .do(
           "run-checks",
           {
-            // No retry — a timed-out exec re-running doubles a 45min stall.
-            retries: { limit: 0, delay: 5_000 },
+            // Runtime rolls during deploys interrupt in-flight execs — the
+            // script is idempotent (remote add||set-url, fetch+checkout,
+            // install), so a retry resumes where the kill left it.
+            retries: { limit: 2, delay: 15_000 },
             timeout: 80 * MINUTE,
           },
           () => {
