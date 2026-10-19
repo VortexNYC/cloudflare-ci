@@ -6,6 +6,7 @@ import {
   completeCheckRun,
   createCheckRun,
   fetchPrBody,
+  getInstallationToken,
   type CheckTarget,
 } from "./checks";
 
@@ -22,7 +23,13 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
   override async run(event: WorkflowEvent<ChecksParams>, step: WorkflowStep) {
     const { repo, sha, prNumber } = event.payload;
     const config = getRepoConfig(repo);
-    const token = this.env.CHECKS_GITHUB_TOKEN;
+    const token = this.env.GITHUB_APP_ID && this.env.GITHUB_APP_PRIVATE_KEY
+      ? await getInstallationToken(
+          this.env.GITHUB_APP_ID,
+          this.env.GITHUB_APP_PRIVATE_KEY,
+          repo
+        ).catch(() => this.env.CHECKS_GITHUB_TOKEN)
+      : this.env.CHECKS_GITHUB_TOKEN;
     if (!config || !token) {
       console.log(`[checks] skipping ${repo}: no config or no GITHUB token`);
       return;

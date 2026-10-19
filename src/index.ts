@@ -245,7 +245,9 @@ async function handleGitHubWebhook(
   env: Bindings
 ): Promise<Response> {
   const secret = env.GITHUB_WEBHOOK_SECRET;
-  const token = env.CHECKS_GITHUB_TOKEN;
+  const token =
+    env.CHECKS_GITHUB_TOKEN ||
+    (env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY ? "app" : undefined);
   if (!secret || !token) {
     return Response.json(
       { error: "checks not configured (webhook secret / GitHub token missing)" },

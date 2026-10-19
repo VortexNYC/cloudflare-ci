@@ -18,6 +18,10 @@ export type Bindings = CiBindings & {
   // webhook signatures.
   CHECKS_GITHUB_TOKEN?: string;
   GITHUB_WEBHOOK_SECRET?: string;
+  // GitHub App creds — installation tokens mint check-runs (OAuth user
+  // tokens can't call the Checks API).
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
   /** Failure self-report — errored claims file a Pile issue. Optional. */
   PILE_BASE_URL?: string;
   PILE_API_KEY?: string;

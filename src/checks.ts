@@ -181,3 +181,71 @@ export async function fetchPrBody(
   )) as Json;
   return str(res.body) ?? "";
 }
+
+/** GitHub App → installation access token. OAuth user tokens can't create
+ *  check runs — only App installation tokens carry checks:write. The JWT
+ *  (RS256, iss=app_id) resolves the org's installation per repo. */
+export async function getInstallationToken(
+  appId: string,
+  privateKeyPem: string,
+  repo: string
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const header = btoa(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payload = btoa(
+    JSON.stringify({
+      iss: Number(appId),
+      iat: now - 60,
+      exp: now + 600,
+    })
+  );
+  const data = `${header}.${payload}`;
+
+  const keyData = pemToDer(privateKeyPem);
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    keyData,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    new TextEncoder().encode(data)
+  );
+  const jwt = `${data}.${btoa(
+    String.fromCharCode(...new Uint8Array(signature))
+  )}`;
+
+  const installation = (await githubApi(
+    jwt,
+    "GET",
+    `/repos/${repo}/installation`
+  )) as Json;
+  const installationId = installation.id;
+  if (typeof installationId !== "number") {
+    throw new Error(`no installation on ${repo}`);
+  }
+
+  const token = (await githubApi(
+    jwt,
+    "POST",
+    `/app/installations/${installationId}/access_tokens`,
+    { permissions: { checks: "write", contents: "read", pull_requests: "read" } }
+  )) as Json;
+  const value = str(token.token);
+  if (!value) throw new Error("installation token mint gave no token");
+  return value;
+}
+
+function pemToDer(pem: string): ArrayBuffer {
+  const body = pem
+    .replace(/-----BEGIN [^-]+-----/g, "")
+    .replace(/-----END [^-]+-----/g, "")
+    .replace(/\s+/g, "");
+  const bin = atob(body);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
