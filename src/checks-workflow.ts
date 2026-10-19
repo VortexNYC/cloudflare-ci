@@ -166,18 +166,28 @@ interface RepoConfigShape {
 }
 
 function buildRunScript(
-  payload: { repo: string; sha: string; headRef?: string },
+  payload: {
+    repo: string;
+    sha: string;
+    headRef?: string;
+    prNumber?: number;
+  },
   config: RepoConfigShape,
   checks: Array<{ name: string; command: string; env?: Record<string, string> }>
 ): string {
-  const ref = payload.headRef ?? payload.sha;
-  const fetchExtra = ref === payload.sha ? "" : ` ${payload.sha}`;
+  // PR heads fetch via the stable pull/N/head ref — a raw sha becomes
+  // unreachable after a force-push and GitHub refuses the sha-in-want.
+  // merge_queue/check_suite events keep sha fetch (always reachable).
+  const fetchRef = payload.prNumber
+    ? `pull/${payload.prNumber}/head`
+    : payload.headRef ?? payload.sha;
   const lines: string[] = [
     "set +e",
     "mkdir -p /workspace && cd /workspace",
     "git init -q .",
-    `git remote add origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git`,
-    `git fetch -q --depth 50 origin ${ref}${fetchExtra} && git checkout -q FETCH_HEAD`,
+    `git remote add origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git 2>/dev/null || ` +
+      `git remote set-url origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git`,
+    `git fetch -q --depth 50 origin ${fetchRef} && git checkout -q ${payload.sha}`,
     "echo ===CI:CHECKOUT:RC=$?===",
   ];
   if (config.checksInstallCommand) {
