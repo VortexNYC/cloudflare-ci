@@ -129,6 +129,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       if (config.checksInstallCommand) {
         const install = await step.do("install", () =>
           sandbox.exec(config.checksInstallCommand!, {
+            cwd: "/workspace",
             env: { NPM_TOKEN: this.env.NPM_TOKEN },
             timeout: 10 * MINUTE,
           })
@@ -146,6 +147,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           if (prBody) env.PR_BODY = prBody;
           if (this.env.NPM_TOKEN) env.NPM_TOKEN = this.env.NPM_TOKEN;
           const res = await sandbox.exec(check.command, {
+            cwd: "/workspace",
             env,
             timeout: check.timeoutMs ?? 10 * MINUTE,
           });
