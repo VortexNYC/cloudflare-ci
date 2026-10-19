@@ -74,6 +74,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       );
     };
 
+    let sandbox: ReturnType<typeof getSandbox> | undefined;
     try {
       // Admission — the lite pool shares the fleet ledger.
       const admitted = await step.do(
@@ -93,10 +94,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         return;
       }
 
-      const sandbox = getSandbox(this.env.SANDBOX_LITE, sandboxId);
+      sandbox = getSandbox(this.env.SANDBOX_LITE, sandboxId);
       // Keep the container alive across step.do checkpoints — without
       // this it evicts between execs and every step hits a dead sandbox.
-      await step.do("keep-alive", () => sandbox.setKeepAlive(true));
+      await step.do("keep-alive", () => sandbox!.setKeepAlive(true));
 
       // PR body for checks that honor the "No tests:" escape hatch.
       const prBody = prNumber
@@ -110,7 +111,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       // (PR branch / gh-readonly-queue ref), else the SHA itself.
       const checkout = await step.do("checkout", async () => {
         const ref = event.payload.headRef ?? sha;
-        const res = await sandbox.exec(
+        const res = await sandbox!.exec(
           `mkdir -p /workspace && cd /workspace && git init -q . && ` +
             `git remote add origin https://x-access-token:$GITHUB_TOKEN@github.com/${repo}.git && ` +
             `git fetch -q --depth 50 origin ${ref} ${ref === sha ? "" : sha} && ` +
@@ -131,7 +132,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       // command is per-repo in config so Go repos bring their own.
       if (config.checksInstallCommand) {
         const install = await step.do("install", () =>
-          sandbox.exec(
+          sandbox!.exec(
             `mkdir -p /workspace && cd /workspace && ${config.checksInstallCommand}`,
             {
               env: { NPM_TOKEN: this.env.NPM_TOKEN },
@@ -151,7 +152,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           const env: Record<string, string> = { ...check.env };
           if (prBody) env.PR_BODY = prBody;
           if (this.env.NPM_TOKEN) env.NPM_TOKEN = this.env.NPM_TOKEN;
-          const res = await sandbox.exec(
+          const res = await sandbox!.exec(
             `cd /workspace && ${check.command}`,
             {
               env,
@@ -180,7 +181,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         }
       }
     } finally {
-      await step.do("stop-keep-alive", () => sandbox.setKeepAlive(false)).catch(() => {});
+      await step.do("stop-keep-alive", async () => { await sandbox?.setKeepAlive(false); }).catch(() => {});
       await withScheduler("release", (stub) => stub.release(sandboxId)).catch(() => {});
     }
   }
