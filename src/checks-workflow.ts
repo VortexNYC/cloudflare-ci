@@ -125,6 +125,9 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 GITHUB_TOKEN: token,
                 NPM_TOKEN: this.env.NPM_TOKEN ?? "",
                 PR_BODY: prBody,
+                CI_REPO: repo.split("/")[1],
+                CI_TOKEN: this.env.ADMIN_TOKEN ?? "",
+                CI_BASE: "https://cloudflare-ci.vortex-nyc.workers.dev",
               },
               timeout: 75 * MINUTE,
             });
@@ -195,9 +198,23 @@ function buildRunScript(
   ];
   if (config.checksInstallCommand) {
     lines.push(
+      // Seed the pnpm store from R2 (keyed by lockfile hash) — a cold
+      // install re-downloads every package; a warm one is ~30-60s.
+      'STORE_KEY="pnpm-$CI_REPO-$(sha256sum pnpm-lock.yaml 2>/dev/null | cut -d\' \' -f1 || echo nolock)"',
+      'mkdir -p /tmp/.pnpm-store',
+      'curl -sf --max-time 60 -H "Authorization: Bearer $CI_TOKEN" ' +
+        '"$CI_BASE/admin/cache/$STORE_KEY" -o /tmp/store.tgz 2>/dev/null ' +
+        '&& tar -xzf /tmp/store.tgz -C /tmp/.pnpm-store 2>/dev/null ' +
+        '|| true',
       `{ ${config.checksInstallCommand}; } > /tmp/install.out 2>&1`,
-      "rc=$?; tail -c 3500 /tmp/install.out",
-      "echo ===CI:INSTALL:RC=$rc==="
+      "rc=$?",
+      "tail -c 3500 /tmp/install.out",
+      "echo ===CI:INSTALL:RC=$rc===",
+      // Upload the store back (best-effort — failures are not fatal)
+      '[ "$rc" = "0" ] && tar -czf /tmp/store-new.tgz -C /tmp .pnpm-store ' +
+        '&& curl -sf --max-time 120 -X PUT -H "Authorization: Bearer $CI_TOKEN" ' +
+        '--data-binary @/tmp/store-new.tgz ' +
+        '"$CI_BASE/admin/cache/$STORE_KEY" 2>/dev/null || true'
     );
   } else {
     lines.push("echo ===CI:INSTALL:RC=0===");

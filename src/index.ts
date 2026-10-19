@@ -134,6 +134,36 @@ async function handleBackupDownload(
   return new Response(object.body, { headers });
 }
 
+// pnpm-store cache for the checks pipeline — check runs curl their dep
+// store in/out instead of re-resolving every package on every event.
+// Keyed `cache/<name>` where name is repo + lockfile hash (set by the
+// check script); same Bearer auth as the other admin routes.
+async function handleChecksCache(
+  request: Request,
+  env: Bindings,
+  key: string
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers.get("authorization")?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const obj = `cache/${key}`;
+  if (request.method === "GET") {
+    const object = await env.BACKUP_BUCKET.get(obj);
+    if (!object) return new Response("Not Found", { status: 404 });
+    const headers = new Headers();
+    headers.set("content-length", String(object.size));
+    headers.set("content-type", "application/octet-stream");
+    return new Response(object.body, { headers });
+  }
+  if (!request.body) return new Response("Bad Request", { status: 400 });
+  await env.BACKUP_BUCKET.put(obj, request.body, {
+    httpMetadata: { contentType: "application/octet-stream" },
+  });
+  return new Response("OK", { status: 200 });
+}
+
 // Escape hatch for sandboxes whose step wedged before destroy() ran — a dead
 // exec stream or abandoned log stream leaves the container billing forever.
 async function handleSandboxKill(
@@ -287,6 +317,10 @@ export default {
     const backupMatch = pathname.match(/^\/admin\/backup\/([0-9a-f-]+)$/);
     if (backupMatch && request.method === "GET") {
       return handleBackupDownload(request, env, backupMatch[1]!);
+    }
+    const cacheMatch = pathname.match(/^\/admin\/cache\/([a-z0-9-]+)$/);
+    if (cacheMatch && (request.method === "GET" || request.method === "PUT")) {
+      return handleChecksCache(request, env, cacheMatch[1]!);
     }
     if (pathname === "/admin/sandbox/kill" && request.method === "POST") {
       return handleSandboxKill(request, env);
