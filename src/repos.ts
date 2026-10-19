@@ -206,6 +206,9 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
         env: {
           PG_TEST_DSN:
             "postgres://postgres:postgres@localhost:5432/veil_test?sslmode=disable",
+          // go test -race needs a C toolchain — CGO stays enabled, not the
+          // toolchain default in some sandbox envs.
+          CGO_ENABLED: "1",
         },
         timeoutMs: 20 * 60 * 1000,
       },
