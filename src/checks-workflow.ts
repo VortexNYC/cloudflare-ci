@@ -125,6 +125,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 GITHUB_TOKEN: token,
                 NPM_TOKEN: this.env.NPM_TOKEN ?? "",
                 PR_BODY: prBody,
+                CI: "true",
                 CI_REPO: repo.split("/")[1],
                 CI_TOKEN: this.env.ADMIN_TOKEN ?? "",
                 CI_BASE: "https://cloudflare-ci.vortex-nyc.workers.dev",
