@@ -22,7 +22,7 @@ type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
 export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
   override async run(event: WorkflowEvent<ChecksParams>, step: WorkflowStep) {
     const { repo, sha, prNumber } = event.payload;
-    const config = getRepoConfig(repo);
+    const config = getRepoConfig(repo.split("/")[1] ?? repo);
     const token = this.env.GITHUB_APP_ID && this.env.GITHUB_APP_PRIVATE_KEY
       ? await getInstallationToken(
           this.env.GITHUB_APP_ID,
