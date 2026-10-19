@@ -108,7 +108,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       const checkout = await step.do("checkout", async () => {
         const ref = event.payload.headRef ?? sha;
         const res = await sandbox.exec(
-          `cd /workspace && git init -q . && ` +
+          `mkdir -p /workspace && cd /workspace && git init -q . && ` +
             `git remote add origin https://x-access-token:$GITHUB_TOKEN@github.com/${repo}.git && ` +
             `git fetch -q --depth 50 origin ${ref} ${ref === sha ? "" : sha} && ` +
             `git checkout -q FETCH_HEAD`,
@@ -128,11 +128,13 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       // command is per-repo in config so Go repos bring their own.
       if (config.checksInstallCommand) {
         const install = await step.do("install", () =>
-          sandbox.exec(config.checksInstallCommand!, {
-            cwd: "/workspace",
-            env: { NPM_TOKEN: this.env.NPM_TOKEN },
-            timeout: 10 * MINUTE,
-          })
+          sandbox.exec(
+            `mkdir -p /workspace && cd /workspace && ${config.checksInstallCommand}`,
+            {
+              env: { NPM_TOKEN: this.env.NPM_TOKEN },
+              timeout: 10 * MINUTE,
+            }
+          )
         );
         if (install.exitCode !== 0) {
           await failAll("Install failed", tail(install));
@@ -146,11 +148,13 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           const env: Record<string, string> = { ...check.env };
           if (prBody) env.PR_BODY = prBody;
           if (this.env.NPM_TOKEN) env.NPM_TOKEN = this.env.NPM_TOKEN;
-          const res = await sandbox.exec(check.command, {
-            cwd: "/workspace",
-            env,
-            timeout: check.timeoutMs ?? 10 * MINUTE,
-          });
+          const res = await sandbox.exec(
+            `cd /workspace && ${check.command}`,
+            {
+              env,
+              timeout: check.timeoutMs ?? 10 * MINUTE,
+            }
+          );
           const ok = res.exitCode === 0;
           await completeCheckRun(token, repo, runIds[check.name]!, {
             conclusion: ok ? "success" : "failure",
