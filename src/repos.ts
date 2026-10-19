@@ -209,7 +209,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "service postgresql start >/dev/null 2>&1 || " +
       "(pg_ctlcluster 16 main start) && " +
       "su postgres -c 'psql -c \"CREATE DATABASE veil_test;\"' >/dev/null 2>&1; " +
-      "pnpm install --frozen-lockfile",
+      "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
     checks: [
       {
         name: "secret-scan",
