@@ -108,24 +108,30 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       // exit 1). A single shell does checkout + install + every check,
       // delimiting each check's output and exit code with markers the
       // parse below turns into per-check conclusions.
-      const run = await step.do(
-        "run-checks",
-        {
-          retries: { limit: 1, delay: 5_000 },
-          timeout: 28 * MINUTE,
-        },
-        () => {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-          return sandbox.exec(buildRunScript(event.payload, config, checks), {
-            env: {
-              GITHUB_TOKEN: token,
-              NPM_TOKEN: this.env.NPM_TOKEN ?? "",
-              PR_BODY: prBody,
-            },
-            timeout: 25 * MINUTE,
-          });
-        }
-      );
+      const run = await step
+        .do(
+          "run-checks",
+          {
+            retries: { limit: 1, delay: 5_000 },
+            timeout: 50 * MINUTE,
+          },
+          () => {
+            const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
+            return sandbox.exec(buildRunScript(event.payload, config, checks), {
+              env: {
+                GITHUB_TOKEN: token,
+                NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+                PR_BODY: prBody,
+              },
+              timeout: 45 * MINUTE,
+            });
+          }
+        )
+        .catch((err: unknown) => ({ __error: String(err) }));
+      if ("__error" in run) {
+        await failAll("Check run error", run.__error);
+        return;
+      }
 
       const parsed = parseRunOutput(run);
       if (parsed.checkoutRc !== 0) {
