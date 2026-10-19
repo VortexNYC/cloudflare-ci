@@ -93,6 +93,14 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     verifyCommand: 'curl -fsS --max-time 15 https://api.seal.nyc/health',
     d1Database: "seal-global",
     d1MigrationsCwd: "apps/api",
+    checksInstallCommand:
+      "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
+    checks: [
+      {
+        name: "secret-scan",
+        command: "pnpm run scan:secrets",
+      },
+    ],
   },
   pile: {
     name: "pile",
@@ -154,6 +162,30 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       },
     ],
   },
+
+  vortex: {
+    name: "vortex",
+    checksInstallCommand:
+      '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
+      'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +
+      "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
+    checks: [
+      {
+        name: "trufflehog",
+        command: "pnpm run scan:secrets",
+      },
+      {
+        // The GHA gate: sdk:build + check + openapi:verify + contract:check.
+        // `vp run test` needs Postgres 16 — deferred until the image gets
+        // pg16 or a PlanetScale dev-branch secret is wired.
+        name: "ci",
+        command:
+          "pnpm exec vp run sdk:build && pnpm exec vp check && " +
+          "pnpm exec vp run openapi:verify && pnpm exec vp run contract:check",
+        timeoutMs: 20 * 60 * 1000,
+      },
+    ],
+  },
   veil: {
     name: "veil",
     // Flip-2 config: secret-scan runs the repo's own scan; ci is the full
@@ -181,7 +213,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
   },
 };
 
-const repoNameSchema = z.enum(["seal", "pile", "veil"]);
+const repoNameSchema = z.enum(["seal", "pile", "veil", "vortex"]);
 
 export function getRepoConfig(repoName: unknown): RepoConfig | undefined {
   const parsed = repoNameSchema.safeParse(repoName);
