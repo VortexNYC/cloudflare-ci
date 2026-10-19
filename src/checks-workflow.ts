@@ -180,6 +180,6 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
 
 /** Last ~4KB of combined output — fits comfortably in a check summary. */
 function tail(res: ExecResult): string {
-  const out = [...res.stdout, ...res.stderr].join("\n");
-  return out.slice(-4000) || "(no output)";
+  const out = [res.stdout, res.stderr].filter(Boolean).join("\n");
+  return out.slice(-4000) || `(no output — exit ${res.exitCode})`;
 }
