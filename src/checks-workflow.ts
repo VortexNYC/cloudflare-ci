@@ -57,7 +57,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         () => fn(scheduler())
       );
 
-    const sandboxId = `checks-${repo.replace("/", "-")}-${sha.slice(0, 10)}`;
+    const sandboxId = `checks-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${sha.slice(0, 10)}`;
     const runIds = await step.do("create-check-runs", async () => {
       const ids: Record<string, number> = {};
       for (const c of checks) {
