@@ -19,6 +19,12 @@ export interface ChecksParams extends CheckTarget {
 
 type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
 
+interface CheckRunOut {
+  name: string;
+  rc: number;
+  output: string;
+}
+
 export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
   override async run(event: WorkflowEvent<ChecksParams>, step: WorkflowStep) {
     const { repo, sha, prNumber } = event.payload;
@@ -31,10 +37,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         ).catch(() => this.env.CHECKS_GITHUB_TOKEN)
       : this.env.CHECKS_GITHUB_TOKEN;
     if (!config || !token) {
-      console.log(`[checks] skipping ${repo}: no config or no GITHUB token`);
+      console.log(`[checks] skipping ${repo}: no config or no GitHub creds`);
       return;
     }
-    const checks = (config.checks ?? []).filter(
+    const checks = config.checks.filter(
       (c) => !event.payload.checkNames || event.payload.checkNames.includes(c.name)
     );
     if (checks.length === 0) return;
@@ -52,8 +58,6 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       );
 
     const sandboxId = `checks-${repo.replace("/", "-")}-${sha.slice(0, 10)}`;
-    // One check run id per check — created up front so GitHub shows
-    // pending checks while the container provisions.
     const runIds = await step.do("create-check-runs", async () => {
       const ids: Record<string, number> = {};
       for (const c of checks) {
@@ -74,31 +78,24 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       );
     };
 
-    let sandbox: ReturnType<typeof getSandbox> | undefined;
-    try {
-      // Admission — the lite pool shares the fleet ledger.
-      const admitted = await step.do(
-        "admit",
-        { retries: { limit: 5, delay: 5_000, backoff: "linear" }, timeout: 60_000 },
-        async () => {
-          const r = await scheduler().admit({
-            pool: "SANDBOX_LITE",
-            name: sandboxId,
-            instanceId: event.instanceId,
-          });
-          return { ok: r.ok, reason: r.ok ? "" : r.reason };
-        }
-      );
-      if (!admitted.ok) {
-        await failAll("CI capacity", "The checks pool is at capacity; retry shortly.");
-        return;
+    const admitted = await step.do(
+      "admit",
+      { retries: { limit: 5, delay: 5_000, backoff: "linear" }, timeout: 60_000 },
+      async () => {
+        const r = await scheduler().admit({
+          pool: "SANDBOX_LITE",
+          name: sandboxId,
+          instanceId: event.instanceId,
+        });
+        return { ok: r.ok, reason: r.ok ? "" : r.reason };
       }
+    );
+    if (!admitted.ok) {
+      await failAll("CI capacity", "The checks pool is at capacity; retry shortly.");
+      return;
+    }
 
-      sandbox = getSandbox(this.env.SANDBOX_LITE, sandboxId);
-      // Keep the container alive across step.do checkpoints — without
-      // this it evicts between execs and every step hits a dead sandbox.
-      await step.do("keep-alive", () => sandbox!.setKeepAlive(true));
-
+    try {
       // PR body for checks that honor the "No tests:" escape hatch.
       const prBody = prNumber
         ? await step.do("fetch-pr-body", () =>
@@ -106,89 +103,134 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           )
         : "";
 
-      // Checkout: real git history (depth 50) — diff-coverage compares
-      // HEAD^1 so a tarball won't do. Fetches the head ref when known
-      // (PR branch / gh-readonly-queue ref), else the SHA itself.
-      const checkout = await step.do("checkout", async () => {
-        const ref = event.payload.headRef ?? sha;
-        const res = await sandbox!.exec(
-          `mkdir -p /workspace && cd /workspace && git init -q . && ` +
-            `git remote add origin https://x-access-token:$GITHUB_TOKEN@github.com/${repo}.git && ` +
-            `git fetch -q --depth 50 origin ${ref} ${ref === sha ? "" : sha} && ` +
-            `git checkout -q FETCH_HEAD`,
-          {
-            env: { GITHUB_TOKEN: token },
-            timeout: 3 * MINUTE,
-          }
-        );
-        return res;
-      });
-      if (checkout.exitCode !== 0) {
-        await failAll("Checkout failed", tail(checkout));
+      // One exec for the whole run: containers do NOT survive step.do
+      // checkpoints (each sandbox.exec on a recycled sandbox returns a bare
+      // exit 1). A single shell does checkout + install + every check,
+      // delimiting each check's output and exit code with markers the
+      // parse below turns into per-check conclusions.
+      const run = await step.do(
+        "run-checks",
+        {
+          retries: { limit: 1, delay: 5_000 },
+          timeout: 28 * MINUTE,
+        },
+        () => {
+          const sandbox = getSandbox(this.env.SANDBOX_LITE, sandboxId);
+          return sandbox.exec(buildRunScript(event.payload, config, checks), {
+            env: {
+              GITHUB_TOKEN: token,
+              NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+              PR_BODY: prBody,
+            },
+            timeout: 25 * MINUTE,
+          });
+        }
+      );
+
+      const parsed = parseRunOutput(run);
+      if (parsed.checkoutRc !== 0) {
+        await failAll("Checkout failed", parsed.output.slice(-4000));
         return;
       }
-
-      // Install — pnpm repos relink from the in-workspace store; the
-      // command is per-repo in config so Go repos bring their own.
-      if (config.checksInstallCommand) {
-        const install = await step.do("install", () =>
-          sandbox!.exec(
-            `mkdir -p /workspace && cd /workspace && ${config.checksInstallCommand}`,
-            {
-              env: { NPM_TOKEN: this.env.NPM_TOKEN },
-              timeout: 10 * MINUTE,
-            }
-          )
-        );
-        if (install.exitCode !== 0) {
-          await failAll("Install failed", tail(install));
-          return;
-        }
+      if (parsed.installRc !== 0) {
+        await failAll("Install failed", parsed.output.slice(-4000));
+        return;
       }
-
-      // Each check gets its own step — a flaky one retries alone.
+      // Post each check's conclusion — the markers carry real per-check
+      // output even though they ran in one shell.
       for (const check of checks) {
-        const result = await step.do(`check-${check.name}`, async () => {
-          const env: Record<string, string> = { ...check.env };
-          if (prBody) env.PR_BODY = prBody;
-          if (this.env.NPM_TOKEN) env.NPM_TOKEN = this.env.NPM_TOKEN;
-          const res = await sandbox!.exec(
-            `cd /workspace && ${check.command}`,
-            {
-              env,
-              timeout: check.timeoutMs ?? 10 * MINUTE,
-            }
-          );
-          const ok = res.exitCode === 0;
-          await completeCheckRun(token, repo, runIds[check.name]!, {
+        const out = parsed.checks[check.name];
+        const ok = out?.rc === 0;
+        await step.do(`report-${check.name}`, () =>
+          completeCheckRun(token, repo, runIds[check.name]!, {
             conclusion: ok ? "success" : "failure",
             title: ok ? `${check.name} passed` : `${check.name} failed`,
-            summary: tail(res),
-          });
-          return ok;
-        });
-        if (!result) {
-          // mark remaining checks skipped rather than leave them pending
-          const idx = checks.indexOf(check);
-          for (const rest of checks.slice(idx + 1)) {
-            await completeCheckRun(token, repo, runIds[rest.name]!, {
-              conclusion: "neutral",
-              title: `${rest.name} skipped`,
-              summary: "An earlier check failed; skipped.",
-            }).catch(() => {});
-          }
-          break;
-        }
+            summary: (out?.output ?? "(no output)").slice(-4000),
+          })
+        );
       }
     } finally {
-      await step.do("stop-keep-alive", async () => { await sandbox?.setKeepAlive(false); }).catch(() => {});
       await withScheduler("release", (stub) => stub.release(sandboxId)).catch(() => {});
     }
   }
 }
 
-/** Last ~4KB of combined output — fits comfortably in a check summary. */
-function tail(res: ExecResult): string {
-  const out = [res.stdout, res.stderr].filter(Boolean).join("\n");
-  return out.slice(-4000) || `(no output — exit ${res.exitCode})`;
+interface RepoConfigShape {
+  checksInstallCommand?: string;
+}
+
+function buildRunScript(
+  payload: { repo: string; sha: string; headRef?: string },
+  config: RepoConfigShape,
+  checks: Array<{ name: string; command: string; env?: Record<string, string> }>
+): string {
+  const ref = payload.headRef ?? payload.sha;
+  const fetchExtra = ref === payload.sha ? "" : ` ${payload.sha}`;
+  const lines: string[] = [
+    "set +e",
+    "mkdir -p /workspace && cd /workspace",
+    "git init -q .",
+    `git remote add origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git`,
+    `git fetch -q --depth 50 origin ${ref}${fetchExtra} && git checkout -q FETCH_HEAD`,
+    "echo ===CI:CHECKOUT:RC=$?===",
+  ];
+  if (config.checksInstallCommand) {
+    lines.push(
+      `{ ${config.checksInstallCommand}; }`,
+      "echo ===CI:INSTALL:RC=$?==="
+    );
+  } else {
+    lines.push("echo ===CI:INSTALL:RC=0===");
+  }
+  for (const check of checks) {
+    const exports = Object.entries(check.env ?? {})
+      .map(([k, v]) => `export ${k}=${shellQuote(v)}`)
+      .join("; ");
+    lines.push(
+      `echo ===CHECK:${check.name}:START===`,
+      exports ? `${exports}; ${check.command}` : check.command,
+      `echo ===CHECK:${check.name}:RC=$?===`
+    );
+  }
+  return lines.join("\n");
+}
+
+function shellQuote(v: string): string {
+  return `'${v.replace(/'/g, `'\\''`)}'`;
+}
+
+interface ParsedRun {
+  checkoutRc: number;
+  installRc: number;
+  checks: Record<string, CheckRunOut>;
+  output: string;
+}
+
+function parseRunOutput(res: ExecResult): ParsedRun {
+  const text = [res.stdout, res.stderr].filter(Boolean).join("\n");
+  const parsed: ParsedRun = { checkoutRc: 1, installRc: 1, checks: {}, output: text };
+  let lastCheck = "";
+  const buckets: Record<string, string[]> = {};
+  for (const line of text.split("\n")) {
+    const ci = line.match(/^===CI:(CHECKOUT|INSTALL):RC=(\d+)$/);
+    if (ci) {
+      if (ci[1] === "CHECKOUT") parsed.checkoutRc = Number(ci[2]);
+      else parsed.installRc = Number(ci[2]);
+      continue;
+    }
+    const cm = line.match(/^===CHECK:([^:]+):(START|RC=(\d+))===$/);
+    if (cm) {
+      if (cm[2] === "START") {
+        lastCheck = cm[1]!;
+        parsed.checks[lastCheck] = { name: lastCheck, rc: 1, output: "" };
+        buckets[lastCheck] = [];
+      } else if (lastCheck && parsed.checks[lastCheck]) {
+        parsed.checks[lastCheck]!.rc = Number(cm[3]);
+        parsed.checks[lastCheck]!.output = buckets[lastCheck]!.join("\n");
+      }
+      continue;
+    }
+    if (lastCheck) buckets[lastCheck]?.push(line);
+  }
+    return parsed;
 }
