@@ -136,7 +136,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "echo INSTALL-START; pwd; ls | head -20; " +
       '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
       'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +
-      "pnpm install --frozen-lockfile --store-dir /workspace/.pnpm-store",
+      "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
     checks: [
       {
         name: "trufflehog",

@@ -212,7 +212,7 @@ function parseRunOutput(res: ExecResult): ParsedRun {
   let lastCheck = "";
   const buckets: Record<string, string[]> = {};
   for (const line of text.split("\n")) {
-    const ci = line.match(/^===CI:(CHECKOUT|INSTALL):RC=(\d+)$/);
+    const ci = line.match(/^===CI:(CHECKOUT|INSTALL):RC=(\d+)===?$/);
     if (ci) {
       if (ci[1] === "CHECKOUT") parsed.checkoutRc = Number(ci[2]);
       else parsed.installRc = Number(ci[2]);
