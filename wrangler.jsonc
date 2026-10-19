@@ -65,6 +65,11 @@
       "name": "cloudflare-ci",
       "binding": "CI_WORKFLOW",
       "class_name": "CI"
+    },
+    {
+      "name": "cloudflare-ci-checks",
+      "binding": "CHECKS_WORKFLOW",
+      "class_name": "ChecksWorkflow"
     }
   ],
   "exports": {

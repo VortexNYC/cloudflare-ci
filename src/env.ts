@@ -10,6 +10,14 @@ export type Bindings = CiBindings & {
   ADMIN_TOKEN?: string;
   SANDBOX_LITE: DurableObjectNamespace<CiSandbox>;
   CI_SCHEDULER: DurableObjectNamespace<CiScheduler>;
+  // Checks-in-pipeline — the workflow that runs repo checks in the lite
+  // pool and reports them back to GitHub via the Checks API.
+  CHECKS_WORKFLOW: Workflow;
+  // GitHub-side auth for the checks path. CHECKS_GITHUB_TOKEN mints
+  // check-runs + reads PRs; GITHUB_WEBHOOK_SECRET verifies inbound
+  // webhook signatures.
+  CHECKS_GITHUB_TOKEN?: string;
+  GITHUB_WEBHOOK_SECRET?: string;
   /** Failure self-report — errored claims file a Pile issue. Optional. */
   PILE_BASE_URL?: string;
   PILE_API_KEY?: string;
