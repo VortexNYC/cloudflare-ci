@@ -83,7 +83,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       { retries: { limit: 5, delay: 5_000, backoff: "linear" }, timeout: 60_000 },
       async () => {
         const r = await scheduler().admit({
-          pool: "SANDBOX_LITE",
+          pool: "SANDBOX",
           name: sandboxId,
           instanceId: event.instanceId,
         });
@@ -115,7 +115,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           timeout: 28 * MINUTE,
         },
         () => {
-          const sandbox = getSandbox(this.env.SANDBOX_LITE, sandboxId);
+          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
           return sandbox.exec(buildRunScript(event.payload, config, checks), {
             env: {
               GITHUB_TOKEN: token,
