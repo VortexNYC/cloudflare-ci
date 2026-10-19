@@ -77,6 +77,12 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     const branch = _event.payload.branch;
     const config = getRepoConfig(repo);
 
+    // Checks-only repos (no build/deploy yet) ride the checks workflow —
+    // nothing to ship here.
+    if (config && !config.buildCommand) {
+      console.log(`[cloudflare-ci] ${String(repo)} is checks-only — skipping deploy pipeline`);
+      return;
+    }
     if (!config) {
       console.log(`[cloudflare-ci] skipping unsupported repo: ${String(repo)}`);
       return;

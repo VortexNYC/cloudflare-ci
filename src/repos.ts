@@ -7,8 +7,9 @@ const repoConfigSchema = z.object({
   // The only step whose snapshot persists — must produce whatever dist/
   // preview and deploy upload. Checks/tests gate locally via pre-push
   // hooks, not in billable containers.
-  buildCommand: z.string(),
-  deployCommand: z.string(),
+  // Optional for checks-only repos (veil flips before its deploy path).
+  buildCommand: z.string().optional(),
+  deployCommand: z.string().optional(),
   // Checks-in-pipeline: GitHub webhook events run these inside the lite
   // pool and report back via the Checks API. `command` runs in /workspace
   // after `checksInstallCommand`; env carries per-check vars (e.g.
@@ -152,9 +153,34 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       },
     ],
   },
+  veil: {
+    name: "veil",
+    // Flip-2 config: secret-scan runs the repo's own scan; ci is the full
+    // `make ci` gate — needs postgres booted first (PG_TEST_DSN below).
+    checksInstallCommand:
+      "service postgresql start >/dev/null 2>&1 || " +
+      "(pg_ctlcluster 16 main start) && " +
+      "su postgres -c 'psql -c \"CREATE DATABASE veil_test;\"' >/dev/null 2>&1; " +
+      "pnpm install --frozen-lockfile",
+    checks: [
+      {
+        name: "secret-scan",
+        command: "pnpm run scan:secrets",
+      },
+      {
+        name: "ci",
+        command: "make ci",
+        env: {
+          PG_TEST_DSN:
+            "postgres://postgres:postgres@localhost:5432/veil_test?sslmode=disable",
+        },
+        timeoutMs: 20 * 60 * 1000,
+      },
+    ],
+  },
 };
 
-const repoNameSchema = z.enum(["seal", "pile"]);
+const repoNameSchema = z.enum(["seal", "pile", "veil"]);
 
 export function getRepoConfig(repoName: unknown): RepoConfig | undefined {
   const parsed = repoNameSchema.safeParse(repoName);
