@@ -94,6 +94,9 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       }
 
       const sandbox = getSandbox(this.env.SANDBOX_LITE, sandboxId);
+      // Keep the container alive across step.do checkpoints — without
+      // this it evicts between execs and every step hits a dead sandbox.
+      await step.do("keep-alive", () => sandbox.setKeepAlive(true));
 
       // PR body for checks that honor the "No tests:" escape hatch.
       const prBody = prNumber
@@ -177,6 +180,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         }
       }
     } finally {
+      await step.do("stop-keep-alive", () => sandbox.setKeepAlive(false)).catch(() => {});
       await withScheduler("release", (stub) => stub.release(sandboxId)).catch(() => {});
     }
   }
