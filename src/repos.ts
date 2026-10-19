@@ -171,8 +171,12 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
     checks: [
       {
+        // scan:secrets = vp exec trufflehog … — vp exec only resolves
+        // node_modules/.bin; call the image binary directly, same args.
         name: "trufflehog",
-        command: "pnpm run scan:secrets",
+        command:
+          "trufflehog git file://. --results=verified --fail --no-update " +
+          "--exclude-globs='node_modules/**,pnpm-lock.yaml'",
       },
       {
         // The GHA gate: sdk:build + check + openapi:verify + contract:check.
