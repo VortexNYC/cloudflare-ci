@@ -7,7 +7,7 @@ RUN npm install -g pnpm@12.4.2 wrangler@4.133.0
 
 # Checks-in-pipeline toolchain: repos run their own check commands in this
 # image — Go for veil's make ci, git for diff-coverage's HEAD^1 compare.
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates postgresql make default-jre-headless \
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates postgresql make default-jre-headless build-essential \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL "https://go.dev/dl/go1.24.5.linux-$(dpkg --print-architecture | sed 's/amd64/amd64/;s/arm64/arm64/').tar.gz" \
     -o /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
