@@ -113,7 +113,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           "run-checks",
           {
             // No retry — a timed-out exec re-running doubles a 45min stall.
-            retries: { limit: 0 },
+            retries: { limit: 0, delay: 5_000 },
             timeout: 80 * MINUTE,
           },
           () => {
