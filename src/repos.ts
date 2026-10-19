@@ -9,6 +9,23 @@ const repoConfigSchema = z.object({
   // hooks, not in billable containers.
   buildCommand: z.string(),
   deployCommand: z.string(),
+  // Checks-in-pipeline: GitHub webhook events run these inside the lite
+  // pool and report back via the Checks API. `command` runs in /workspace
+  // after `checksInstallCommand`; env carries per-check vars (e.g.
+  // DIFF_COVERAGE_BASE). Check `name` is the check-run name branch
+  // protection expects.
+  checks: z
+    .array(
+      z.object({
+        name: z.string(),
+        command: z.string(),
+        env: z.record(z.string()).default({}),
+        timeoutMs: z.number().optional(),
+      })
+    )
+    .default([]),
+  // Per-repo install run once before checks (pnpm install, go mod download).
+  checksInstallCommand: z.string().optional(),
   previewCommand: z.string().optional(),
   // Post-ship probe on the lite pool, run after deploy on main only.
   // Non-zero exit fails the run — a deploy that uploads but does not serve
@@ -112,6 +129,28 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     verifyCommand: 'curl -fsS --max-time 15 https://pile.nyc/health',
     d1Database: "pile-global",
     d1MigrationsCwd: ".",
+    // Checks-in-pipeline: replaces the Blacksmith GHA gates. Names are what
+    // branch protection requires — keep them stable across the flip.
+    checksInstallCommand:
+      '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
+      'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +
+      "pnpm install --frozen-lockfile --store-dir /workspace/.pnpm-store",
+    checks: [
+      {
+        name: "trufflehog",
+        // The repo's own scan gate (secretlint) — same rules as the
+        // pre-push hook; cheaper than fetching a trufflehog binary.
+        command: "pnpm scan:secrets",
+      },
+      {
+        name: "diff-coverage",
+        // HEAD^1 is the base parent of the PR merge commit; PR_BODY is
+        // injected by the workflow when the event carries a PR number.
+        command: "pnpm exec vp run diff-coverage",
+        env: { DIFF_COVERAGE_BASE: "HEAD^1" },
+        timeoutMs: 10 * 60 * 1000,
+      },
+    ],
   },
 };
 

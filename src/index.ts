@@ -2,6 +2,9 @@ import { CiSandbox } from "@cloudflare/ci/worker";
 import { getSandbox } from "@cloudflare/sandbox";
 
 import { CI } from "./ci";
+import { ChecksWorkflow } from "./checks-workflow";
+import { parseCheckEvent, verifyGitHubSignature } from "./checks";
+import { getRepoConfig } from "./repos";
 import type { Bindings } from "./env";
 import type { CiScheduler } from "./scheduler";
 
@@ -233,9 +236,49 @@ async function handleSandboxRelease(
   return Response.json({ ok: true });
 }
 
+
+/** GitHub webhook → checks-in-pipeline. Verifies the HMAC signature, then
+ *  one ChecksWorkflow per (repo, sha): check runs open immediately as
+ *  in_progress and the container path posts conclusions. */
+async function handleGitHubWebhook(
+  request: Request,
+  env: Bindings
+): Promise<Response> {
+  const secret = env.GITHUB_WEBHOOK_SECRET;
+  const token = env.CHECKS_GITHUB_TOKEN;
+  if (!secret || !token) {
+    return Response.json(
+      { error: "checks not configured (webhook secret / GitHub token missing)" },
+      { status: 501 }
+    );
+  }
+  const rawBody = await request.text();
+  const signature = request.headers.get("x-hub-signature-256");
+  if (!(await verifyGitHubSignature(secret, rawBody, signature))) {
+    return Response.json({ error: "bad signature" }, { status: 401 });
+  }
+  const event = request.headers.get("x-github-event") ?? "";
+  const target = parseCheckEvent(
+    event,
+    JSON.parse(rawBody) as unknown
+  );
+  if (!target) return Response.json({ ok: true, skipped: event });
+
+  const config = getRepoConfig(target.repo.split("/")[1] ?? "");
+  if (!config || config.checks.length === 0) {
+    return Response.json({ ok: true, skipped: `no checks for ${target.repo}` });
+  }
+  const id = `checks-${target.repo.replace("/", "-")}-${target.sha.slice(0, 10)}-${Date.now()}`;
+  await env.CHECKS_WORKFLOW.create({ id, params: target });
+  return Response.json({ ok: true, id });
+}
+
 export default {
   fetch(request: Request, env: Bindings) {
     const { pathname } = new URL(request.url);
+    if (pathname === "/webhook/github" && request.method === "POST") {
+      return handleGitHubWebhook(request, env);
+    }
     if (pathname === "/admin/artifacts" && request.method === "POST") {
       return handleAdmin(request, env);
     }
@@ -275,3 +318,4 @@ export default {
 };
 
 export { CiScheduler } from "./scheduler";
+export { ChecksWorkflow } from "./checks-workflow";
