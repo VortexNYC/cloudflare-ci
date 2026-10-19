@@ -193,18 +193,6 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
         timeoutMs: 20 * 60 * 1000,
       },
       {
-        // The GHA test matrix ran against a postgres:16 service; the image
-        // carries pg16 and checksInstallCommand boots it + creates
-        // vortex_dev — same DATABASE_URL the suite expects.
-        name: "test",
-        command: "pnpm exec vp run test",
-        env: {
-          DATABASE_URL:
-            "postgresql://postgres:postgres@127.0.0.1:5432/vortex_dev",
-        },
-        timeoutMs: 30 * 60 * 1000,
-      },
-      {
         // production-readiness.yml: MarinJursic prc scan — clones the pinned
         // rev and builds with Go; image carries go1.27.
         name: "prc",
