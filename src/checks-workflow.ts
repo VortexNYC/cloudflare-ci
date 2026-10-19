@@ -112,8 +112,9 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         .do(
           "run-checks",
           {
-            retries: { limit: 1, delay: 5_000 },
-            timeout: 50 * MINUTE,
+            // No retry — a timed-out exec re-running doubles a 45min stall.
+            retries: { limit: 0 },
+            timeout: 80 * MINUTE,
           },
           () => {
             const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
@@ -123,7 +124,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 NPM_TOKEN: this.env.NPM_TOKEN ?? "",
                 PR_BODY: prBody,
               },
-              timeout: 45 * MINUTE,
+              timeout: 75 * MINUTE,
             });
           }
         )
