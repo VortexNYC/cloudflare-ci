@@ -16,6 +16,15 @@ export type Bindings = CiBindings & {
   // Checks-in-pipeline — the workflow that runs repo checks in the lite
   // pool and reports them back to GitHub via the Checks API.
   CHECKS_WORKFLOW: Workflow;
+  // push→Artifacts mirror (replaces artifacts-sync.yml): clones the pushed
+  // branch and force-pushes it, firing cf.artifacts.repo.pushed downstream.
+  MIRROR_WORKFLOW: Workflow;
+  // Artifacts token minting + remote URL. ARTIFACTS_API_TOKEN is the
+  // Artifacts:Write-scoped CF API token (repo tokens minted per-push are
+  // TTL'd — a stored push token expires silently).
+  ARTIFACTS_ACCOUNT_ID?: string;
+  ARTIFACTS_API_TOKEN?: string;
+  CLOUDFLARE_API_TOKEN?: string;
   // GitHub-side auth for the checks path. CHECKS_GITHUB_TOKEN mints
   // check-runs + reads PRs; GITHUB_WEBHOOK_SECRET verifies inbound
   // webhook signatures.

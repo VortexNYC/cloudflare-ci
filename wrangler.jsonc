@@ -89,6 +89,11 @@
       "name": "cloudflare-ci-checks",
       "binding": "CHECKS_WORKFLOW",
       "class_name": "ChecksWorkflow"
+    },
+    {
+      "name": "cloudflare-ci-mirror",
+      "binding": "MIRROR_WORKFLOW",
+      "class_name": "MirrorWorkflow"
     }
   ],
   "exports": {

@@ -71,15 +71,47 @@ test("parseCheckEvent: merge_group checks_requested recovers the PR number", () 
     repository: { full_name: "VortexNYC/pile" },
     merge_group: {
       head_sha: "queue-sha",
-      head_ref: "gh-readonly-queue/main/pr-42-abcd1234",
+      head_ref: "refs/heads/gh-readonly-queue/main/pr-42-abcd1234",
+      base_sha: "base-sha",
     },
   });
   assert.deepEqual(target, {
     repo: "VortexNYC/pile",
     sha: "queue-sha",
-    headRef: "gh-readonly-queue/main/pr-42-abcd1234",
+    headRef: "refs/heads/gh-readonly-queue/main/pr-42-abcd1234",
+    baseSha: "base-sha",
     prNumber: 42,
   });
+});
+
+test("parseCheckEvent: pull_request edited marks the target for rescoping", () => {
+  const target = parseCheckEvent("pull_request", {
+    action: "edited",
+    repository: { full_name: "VortexNYC/pile" },
+    pull_request: { number: 42, head: { sha: "abc123", ref: "feat-x" } },
+  });
+  assert.equal(target?.edited, true);
+  assert.equal(target?.sha, "abc123");
+  // Non-edit actions never carry the flag.
+  const opened = parseCheckEvent("pull_request", {
+    action: "opened",
+    repository: { full_name: "VortexNYC/pile" },
+    pull_request: { number: 42, head: { sha: "abc123" } },
+  });
+  assert.equal(opened?.edited, undefined);
+});
+
+test("parseCheckEvent: check_suite on a queue branch recovers the PR number", () => {
+  const target = parseCheckEvent("check_suite", {
+    action: "requested",
+    repository: { full_name: "VortexNYC/pile" },
+    check_suite: {
+      head_sha: "queue-sha",
+      head_branch: "gh-readonly-queue/main/pr-42-abcd1234",
+    },
+  });
+  assert.equal(target?.prNumber, 42);
+  assert.equal(target?.headRef, "gh-readonly-queue/main/pr-42-abcd1234");
 });
 
 test("parseCheckEvent: check_suite requested", () => {
@@ -112,15 +144,61 @@ test("buildRunScript carries no cache transport or worker creds", () => {
   assert.match(script, /touch \/tmp\/\.install-ok/);
 });
 
-test("buildCheckoutScript fetches pull/N/head for PR events, sha otherwise", () => {
-  const pr = buildCheckoutScript({
+test("buildCheckoutScript prefers a fresh PR merge ref, head as fallback", () => {
+  const script = buildCheckoutScript({
     repo: "VortexNYC/pile",
     sha: "abc123",
     prNumber: 42,
   });
-  assert.match(pr, /git fetch -q --depth 50 origin pull\/42\/head/);
+  // The merge ref gives HEAD^1 = base tip — the diff base coverage checks
+  // measure against; verified fresh via the merge's second parent.
+  assert.match(script, /git fetch -q --depth 50 origin pull\/42\/merge/);
+  assert.match(script, /git rev-parse 'FETCH_HEAD\^2'/);
+  assert.match(script, /= "abc123"/);
+  assert.match(script, /git checkout -q FETCH_HEAD/);
+  // Stale/absent merge ref falls back to the head fetch.
+  assert.match(script, /git fetch -q --depth 50 origin pull\/42\/head && git checkout -q abc123/);
+  assert.match(script, /git update-ref refs\/ci\/base HEAD\^1/);
+});
+
+test("buildCheckoutScript fetches the queue ref for merge groups", () => {
+  const script = buildCheckoutScript({
+    repo: "VortexNYC/pile",
+    sha: "queue-sha",
+    headRef: "refs/heads/gh-readonly-queue/main/pr-42-abcd1234",
+    prNumber: 42,
+    baseSha: "base-sha",
+  });
+  // The queue sha is unreachable from pull/N/head — the queue branch is
+  // fetched instead even though prNumber is set.
+  assert.match(
+    script,
+    /git fetch -q --depth 50 origin 'refs\/heads\/gh-readonly-queue\/main\/pr-42-abcd1234' && git checkout -q queue-sha/
+  );
+  assert.doesNotMatch(script, /pull\/42\//);
+  // The group's base sha pins the diff base, not HEAD^1 (chain merges).
+  assert.match(script, /git update-ref refs\/ci\/base base-sha/);
+});
+
+test("buildCheckoutScript falls back to HEAD^1 base when no base sha", () => {
+  const script = buildCheckoutScript({
+    repo: "VortexNYC/pile",
+    sha: "queue-sha",
+    headRef: "gh-readonly-queue/main/pr-42-abcd1234",
+  });
+  assert.match(script, /git update-ref refs\/ci\/base HEAD\^1/);
+});
+
+test("buildCheckoutScript fetches sha or headRef for non-PR events", () => {
   const push = buildCheckoutScript({ repo: "VortexNYC/pile", sha: "abc123" });
-  assert.match(push, /git fetch -q --depth 50 origin abc123/);
+  assert.match(push, /git fetch -q --depth 50 origin 'abc123' && git checkout -q abc123/);
+  assert.match(push, /git update-ref refs\/ci\/base HEAD\^1/);
+  const suite = buildCheckoutScript({
+    repo: "VortexNYC/pile",
+    sha: "abc123",
+    headRef: "feat-y",
+  });
+  assert.match(suite, /git fetch -q --depth 50 origin 'feat-y' && git checkout -q abc123/);
 });
 
 test("buildRunScript wraps timeoutMs checks in GNU timeout, others plain", () => {

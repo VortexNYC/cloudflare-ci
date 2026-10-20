@@ -22,6 +22,9 @@ const repoConfigSchema = z.object({
         command: z.string(),
         env: z.record(z.string()).default({}),
         timeoutMs: z.number().optional(),
+        // Check consumes PR_BODY (e.g. the "No tests:" escape hatch) —
+        // pull_request.edited events re-run only these, not the whole set.
+        usesPrBody: z.boolean().default(false),
       })
     )
     .default([]),
@@ -97,7 +100,9 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
     checks: [
       {
-        name: "secret-scan",
+        // Must stay `secretlint` — seal's branch protection still requires
+        // the retired GHA job's context name.
+        name: "secretlint",
         command: "pnpm run scan:secrets",
       },
     ],
@@ -154,11 +159,21 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       },
       {
         name: "diff-coverage",
-        // HEAD^1 is the base parent of the PR merge commit; PR_BODY is
-        // injected by the workflow when the event carries a PR number.
+        // The checkout pins refs/ci/base to the true diff base (merge
+        // parent / merge_group.base_sha); PR_BODY is injected by the
+        // workflow when the event carries a PR number.
         command: "pnpm exec vp run diff-coverage",
-        env: { DIFF_COVERAGE_BASE: "HEAD^1" },
+        env: { DIFF_COVERAGE_BASE: "refs/ci/base" },
         timeoutMs: 10 * 60 * 1000,
+        usesPrBody: true,
+      },
+      {
+        name: "gitleaks",
+        // Replaces gitleaks.yml — same config file, same range semantics.
+        // refs/ci/base is pinned at checkout to the true diff base.
+        command:
+          'gitleaks git --config .gitleaks.toml --redact --log-opts "refs/ci/base..HEAD" --verbose .',
+        timeoutMs: 5 * 60 * 1000,
       },
     ],
   },

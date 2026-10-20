@@ -61,6 +61,11 @@ A repo in `src/repos.ts` must:
   no installs beyond the provided relink.
 - `installEnv` sets `VP_GIT_HOOKS=0` so `prepare` doesn't wire hooks in
   throwaway containers.
+- Diff-based checks measure against `refs/ci/base`, pinned by the checkout
+  script: PR events check out `pull/N/merge` when it's fresh (so the base is
+  the base-branch tip, not the tip commit's parent), `merge_group` events pin
+  `base_sha` from the payload. `usesPrBody` checks re-run on PR body edits —
+  that's the `No tests:` escape hatch.
 - Containers expose `pnpm`, `vp`, `wrangler`, `curl`, `unsquashfs` on PATH
   (see `Dockerfile`). The 1.0 checks image (`Dockerfile.checks`) adds
   `zstd` for DirectoryBackup and `sandbox-shim` — its tag must match the

@@ -34,4 +34,9 @@ COPY --from=docker.io/cloudflare/sandbox:1.0.1 /usr/local/bin/sandbox-shim /usr/
 # /workspace is our exec cwd; the checkout script's own mkdir was too late.
 RUN mkdir -p /workspace
 
+
+# gitleaks — the pile secret-scan gate moved here from gitleaks.yml (the
+# repo's .gitleaks.toml drives the rules; the binary just runs the scan).
+RUN curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz" -o /tmp/gitleaks.tgz  && echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tgz" | sha256sum -c -  && tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks && rm /tmp/gitleaks.tgz
+
 CMD ["sleep", "infinity"]
