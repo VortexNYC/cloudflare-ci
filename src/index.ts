@@ -318,11 +318,13 @@ async function handleGitHubWebhook(
     const id = `release-${target.repo}-${target.tag}-${target.sha.slice(0, 10)}`
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
-    await env.RELEASE_WORKFLOW.create({
+    // A same-sha re-tag reuses the id — create() throws on a duplicate;
+    // treat it as already-dispatched instead of a webhook 500.
+    const created = await env.RELEASE_WORKFLOW.create({
       id,
       params: { repo: target.repo, tag: target.tag, sha: target.sha },
-    });
-    return Response.json({ ok: true, id, release: target.tag });
+    }).then(() => true, () => false);
+    return Response.json({ ok: true, id, release: target.tag, created });
   }
 
   if (target.mirrorRef) {
