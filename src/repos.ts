@@ -10,6 +10,9 @@ const repoConfigSchema = z.object({
   // Optional for checks-only repos (veil flips before its deploy path).
   buildCommand: z.string().optional(),
   deployCommand: z.string().optional(),
+  // VTX-583: a failed verify rolls prod back to the previous deployment —
+  // typically `wrangler rollback -e production`. Absent disables rollback.
+  rollbackCommand: z.string().optional(),
   // Checks-in-pipeline: GitHub webhook events run these inside the lite
   // pool and report back via the Checks API. `command` runs in /workspace
   // after `checksInstallCommand`; env carries per-check vars (e.g.
@@ -135,6 +138,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "pnpm exec vp run typecheck && pnpm -C apps/web run build && pnpm -C packages/docs run build",
     deployCommand:
       "pnpm exec wrangler deploy -e production && pnpm -C packages/docs run deploy",
+    rollbackCommand: "pnpm exec wrangler rollback -e production",
     // Version URLs aren't generated for DO workers, so previews are a real
     // second worker: staging.pile.nyc. env.staging shares prod data
     // bindings but has no queue consumer, no cron, no EMAIL — last branch
