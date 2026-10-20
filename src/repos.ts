@@ -134,6 +134,13 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
         name: "secretlint",
         command: "pnpm run scan:secrets",
       },
+      {
+        // VTX-590: seal's `ci` gate — vp check covers format/lint/types;
+        // typecheck rides build, tests gate in pre-push like every repo.
+        name: "ci",
+        command: "pnpm exec vp check",
+        timeoutMs: 15 * 60 * 1000,
+      },
     ],
   },
   pile: {
@@ -193,9 +200,10 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
     checks: [
       {
-        name: "trufflehog",
-        // The repo's own scan gate (secretlint) — same rules as the
-        // pre-push hook; cheaper than fetching a trufflehog binary.
+        // VTX-592: the tool is secretlint (pnpm scan:secrets); the check
+        // name now says so. pile's required contexts list is empty, so the
+        // rename doesn't wedge any PR.
+        name: "secretlint",
         command: "pnpm scan:secrets",
       },
       {
@@ -286,7 +294,11 @@ const repoNameSchema = z.enum(["seal", "pile", "veil", "vortex"]);
 // the merged list is the single source for required contexts (VTX-581).
 // gitleaks scans every repo's diff with the repo's .gitleaks.toml when it
 // exists, defaults otherwise — one check name, one binary, every repo.
-const baselineChecks: z.input<typeof repoConfigSchema>["checks"] = [
+type CheckEntry = NonNullable<
+  z.input<typeof repoConfigSchema>["checks"]
+>[number];
+
+const baselineChecks: CheckEntry[] = [
   {
     name: "gitleaks",
     command:
@@ -304,7 +316,7 @@ export function getRepoConfig(repoName: unknown): RepoConfig | undefined {
   const config = repoConfigs[parsed.data];
   if (!config) return undefined;
   const merged = { ...config };
-  const byName = new Map<string, (typeof baselineChecks)[number]>();
+  const byName = new Map<string, CheckEntry>();
   for (const check of baselineChecks) byName.set(check.name, check);
   for (const check of merged.checks ?? []) byName.set(check.name, check);
   merged.checks = [...byName.values()];
