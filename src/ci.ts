@@ -295,23 +295,51 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
 
     // Post-deploy proof, same lite-pool shape as migrate: self-contained
     // command, no workspace restore. A non-zero exit fails the run — a
-    // deploy that uploads but does not serve is a failed deploy.
+    // deploy that uploads but does not serve is a failed deploy, and a
+    // failed verify rolls prod back to the previous deployment instead of
+    // leaving the bad version serving (VTX-583).
     if (config.verifyCommand) {
-      await ci.runner({
-        name: "verify",
-        sandbox: "SANDBOX_LITE",
-        persist: false,
-        command: bound(config.verifyCommand, VERIFY_COMMAND_TIMEOUT_MS),
-        secrets: config.verifySecrets,
-        cloudflareCredentials: {
-          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
-        },
-        env: { ...baseEnv, ...config.verifyEnv },
-        config: {
-          timeout: VERIFY_STEP_TIMEOUT_MS,
-          commandTimeoutMs: VERIFY_COMMAND_TIMEOUT_MS,
-        },
-      });
+      try {
+        await ci.runner({
+          name: "verify",
+          sandbox: "SANDBOX_LITE",
+          persist: false,
+          command: bound(config.verifyCommand, VERIFY_COMMAND_TIMEOUT_MS),
+          secrets: config.verifySecrets,
+          cloudflareCredentials: {
+            accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+          },
+          env: { ...baseEnv, ...config.verifyEnv },
+          config: {
+            timeout: VERIFY_STEP_TIMEOUT_MS,
+            commandTimeoutMs: VERIFY_COMMAND_TIMEOUT_MS,
+          },
+        });
+      } catch (verifyError) {
+        if (!config.rollbackCommand) throw verifyError;
+        console.error(
+          `[cloudflare-ci] verify failed for ${String(repo)} — rolling back`
+        );
+        await ci.runner({
+          name: "rollback",
+          sandbox: "SANDBOX_LITE",
+          persist: false,
+          command: bound(config.rollbackCommand, MIGRATE_COMMAND_TIMEOUT_MS),
+          secrets: ["CF_TOKEN"],
+          cloudflareCredentials: {
+            accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+          },
+          env: baseEnv,
+          config: {
+            timeout: MIGRATE_STEP_TIMEOUT_MS,
+            commandTimeoutMs: MIGRATE_COMMAND_TIMEOUT_MS,
+          },
+        }).catch((rollbackError) => {
+          // A failed rollback must not mask the verify failure that caused it.
+          console.error("[cloudflare-ci] rollback failed", rollbackError);
+        });
+        throw verifyError;
+      }
     }
     await withScheduler("dedupe-complete", async (stub) => {
       await stub.completeClaim(String(repo), branchKey, _event.instanceId);
