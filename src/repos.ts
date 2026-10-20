@@ -13,6 +13,17 @@ const repoConfigSchema = z.object({
   // VTX-583: a failed verify rolls prod back to the previous deployment —
   // typically `wrangler rollback -e production`. Absent disables rollback.
   rollbackCommand: z.string().optional(),
+  // VTX-582: gradual rollout — when set, the worker ships via
+  // `versions upload` (no traffic) then staged `versions deploy <id>@<pct>`
+  // instead of deployCommand's wrangler call. deployCommand still runs after
+  // for non-versioned extras (docs deploy); rollout steps then take traffic
+  // percentages in order, ending at 100.
+  rolloutUploadCommand: z.string().optional(),
+  /** Shell snippet run per percentage — must consume $VID (uploaded version
+   *  id) and $PCT (step's traffic percent). */
+  rolloutPromoteCommand: z.string().optional(),
+  rolloutSteps: z.array(z.number()).optional(),
+  rolloutSettleSec: z.number().default(60),
   // Checks-in-pipeline: GitHub webhook events run these inside the lite
   // pool and report back via the Checks API. `command` runs in /workspace
   // after `checksInstallCommand`; env carries per-check vars (e.g.
@@ -136,9 +147,15 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     // deploy step runs the worker deploy first so docs never lead prod.
     buildCommand:
       "pnpm exec vp run typecheck && pnpm -C apps/web run build && pnpm -C packages/docs run build",
-    deployCommand:
-      "pnpm exec wrangler deploy -e production && pnpm -C packages/docs run deploy",
+    // With rollout configured the worker ships via versions upload + staged
+    // promote; deployCommand carries only the non-versioned extras (docs).
+    deployCommand: "pnpm -C packages/docs run deploy",
     rollbackCommand: "pnpm exec wrangler rollback -e production",
+    rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
+    rolloutPromoteCommand:
+      'pnpm exec wrangler versions deploy "$VID@$PCT%" -e production',
+    rolloutSteps: [10, 50, 100],
+    rolloutSettleSec: 90,
     // Version URLs aren't generated for DO workers, so previews are a real
     // second worker: staging.pile.nyc. env.staging shares prod data
     // bindings but has no queue consumer, no cron, no EMAIL — last branch
