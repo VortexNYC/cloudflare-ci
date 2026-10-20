@@ -193,6 +193,12 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     releaseCommand:
       // The checks image has no bun — pnpm dlx pulls the npm package
       // (tarball, no unzip needed unlike the bun.sh installer).
+      // supported-architectures pulls the optional darwin platform deps
+      // (e.g. @opentui/core-darwin-*) pnpm would skip on a Linux host.
+      "cd /workspace && printf 'supported-architectures.os[]=linux\n" +
+      "supported-architectures.os[]=darwin\n" +
+      "supported-architectures.cpu[]=x64\n" +
+      "supported-architectures.cpu[]=arm64\n' > .npmrc && " +
       "cd packages/cli && pnpm install --frozen-lockfile && " +
       'for T in linux-x64 darwin-arm64 darwin-x64; do pnpm dlx bun build --compile --minify --target=bun-$T src/index.ts --outfile "dist/pile-$T"; done && ' +
       'RID=$(curl -sf -X POST -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/releases" ' +
