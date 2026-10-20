@@ -30,6 +30,15 @@ const repoConfigSchema = z.object({
   stagingVerifyCommand: z.string().optional(),
   /** Settle time between staging deploy and its verify probe. */
   stagingBakeSec: z.number().default(30),
+  // VTX-586: named worker secrets injected into the deploy step env —
+  // same mechanism as buildSecrets/verifySecrets, for deploy-time creds.
+  deploySecrets: z.array(z.string()).default([]),
+  // VTX-585: post-rollout error watch — polls this command for watchSec
+  // after a successful verify; any failure → rollbackCommand. The command
+  // is a repo-owned probe (error-rate check, SLO query, etc.).
+  watchCommand: z.string().optional(),
+  watchIntervalSec: z.number().default(30),
+  watchSec: z.number().default(300),
   // Checks-in-pipeline: GitHub webhook events run these inside the lite
   // pool and report back via the Checks API. `command` runs in /workspace
   // after `checksInstallCommand`; env carries per-check vars (e.g.

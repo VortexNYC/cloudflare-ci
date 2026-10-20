@@ -333,7 +333,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     await buildResult.runner({
       name: "deploy",
       command: bound(deployCommand, DEPLOY_COMMAND_TIMEOUT_MS),
-      secrets: ["NPM_TOKEN"],
+      secrets: ["NPM_TOKEN", ...config.deploySecrets],
       persist: false,
       cloudflareCredentials: {
         accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
@@ -345,11 +345,36 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       },
     });
 
+    // VTX-583: a failed gate (verify, or the post-rollout watch below) runs
+    // rollbackCommand instead of leaving the bad deploy serving. A failed
+    // rollback is logged but never masks the gate failure that caused it.
+    const rollback = async (gate: string): Promise<void> => {
+      if (!config.rollbackCommand) return;
+      console.error(`[cloudflare-ci] ${gate} failed for ${String(repo)} — rolling back`);
+      await ci
+        .runner({
+          name: "rollback",
+          sandbox: "SANDBOX_LITE",
+          persist: false,
+          command: bound(config.rollbackCommand, MIGRATE_COMMAND_TIMEOUT_MS),
+          secrets: ["CF_TOKEN"],
+          cloudflareCredentials: {
+            accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+          },
+          env: baseEnv,
+          config: {
+            timeout: MIGRATE_STEP_TIMEOUT_MS,
+            commandTimeoutMs: MIGRATE_COMMAND_TIMEOUT_MS,
+          },
+        })
+        .catch((rollbackError) => {
+          console.error("[cloudflare-ci] rollback failed", rollbackError);
+        });
+    };
+
     // Post-deploy proof, same lite-pool shape as migrate: self-contained
     // command, no workspace restore. A non-zero exit fails the run — a
-    // deploy that uploads but does not serve is a failed deploy, and a
-    // failed verify rolls prod back to the previous deployment instead of
-    // leaving the bad version serving (VTX-583).
+    // deploy that uploads but does not serve is a failed deploy.
     if (config.verifyCommand) {
       try {
         await ci.runner({
@@ -368,29 +393,40 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           },
         });
       } catch (verifyError) {
-        if (!config.rollbackCommand) throw verifyError;
-        console.error(
-          `[cloudflare-ci] verify failed for ${String(repo)} — rolling back`
-        );
+        await rollback("verify");
+        throw verifyError;
+      }
+    }
+
+    // VTX-585: post-rollout error watch — the repo's own probe (error-rate
+    // check, SLO query) polls for watchSec; a breach rolls prod back.
+    if (config.watchCommand && config.rollbackCommand) {
+      try {
         await ci.runner({
-          name: "rollback",
+          name: "watch",
           sandbox: "SANDBOX_LITE",
           persist: false,
-          command: bound(config.rollbackCommand, MIGRATE_COMMAND_TIMEOUT_MS),
-          secrets: ["CF_TOKEN"],
+          command: bound(
+            `END=$((SECONDS + ${config.watchSec})); ` +
+              `while [ $SECONDS -lt $END ]; do ` +
+              `${config.watchCommand} || exit 1; ` +
+              `sleep ${config.watchIntervalSec}; done`,
+            config.watchSec * 1000 + VERIFY_COMMAND_TIMEOUT_MS
+          ),
+          secrets: config.verifySecrets,
           cloudflareCredentials: {
             accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
           },
           env: baseEnv,
           config: {
-            timeout: MIGRATE_STEP_TIMEOUT_MS,
-            commandTimeoutMs: MIGRATE_COMMAND_TIMEOUT_MS,
+            timeout: (config.watchSec + 2 * 60) * 1000,
+            commandTimeoutMs:
+              config.watchSec * 1000 + VERIFY_COMMAND_TIMEOUT_MS,
           },
-        }).catch((rollbackError) => {
-          // A failed rollback must not mask the verify failure that caused it.
-          console.error("[cloudflare-ci] rollback failed", rollbackError);
         });
-        throw verifyError;
+      } catch (watchError) {
+        await rollback("watch");
+        throw watchError;
       }
     }
     await withScheduler("dedupe-complete", async (stub) => {
