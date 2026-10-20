@@ -155,7 +155,7 @@ export function parseCheckEvent(
   if (event === "push") {
     const ref = str(payload.ref);
     const sha = str(payload.after);
-    if (!sha) return null;
+    if (!sha || event.deleted === true || sha === "0000000000000000000000000000000000000000") return null;
     if (ref?.startsWith("refs/tags/")) {
       return { repo, sha, tag: ref.slice("refs/tags/".length) };
     }
