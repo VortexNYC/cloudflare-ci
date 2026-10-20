@@ -24,8 +24,12 @@ RUN ARCH="$(dpkg --print-architecture)" && curl -fsSL \
     "https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.1/trufflehog_3.97.1_linux_${ARCH}.tar.gz" \
     -o /tmp/trufflehog.tgz && tar -C /usr/local/bin -xzf /tmp/trufflehog.tgz trufflehog && rm /tmp/trufflehog.tgz
 
-# Files + S3Mount drive the container through this helper. Its tag must match
-# the installed sandbox-1 package version.
+# Files + DirectoryBackup drive the container through this helper. Its tag
+# must match the installed sandbox-1 package version.
 COPY --from=docker.io/cloudflare/sandbox:1.0.1 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+
+# container.exec resolves argv[0] against the shim's PATH view, which sees
+# /usr/local/bin — mirror the binaries we exec directly there.
+RUN ln -sf /usr/bin/timeout /usr/bin/sha256sum /usr/bin/bash /usr/local/bin/
 
 CMD ["sleep", "infinity"]

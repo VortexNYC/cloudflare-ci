@@ -114,10 +114,11 @@ export class ChecksSandbox extends DurableObject<Bindings> {
   ): Promise<ChecksRunResult> {
     await this.files.writeFile(path, script);
     // GNU timeout kills the process group — an AbortSignal would orphan the
-    // script's children. Exit code 124 means the bound was hit. argv[0] must
-    // be absolute: container.exec doesn't resolve bare names through PATH.
+    // script's children. Exit code 124 means the bound was hit. argv[0] lives
+    // in /usr/local/bin: container.exec resolves commands against the shim's
+    // PATH view, not the image's full PATH.
     const process = await this.container.exec(
-      ["/usr/bin/timeout", "--kill-after=10", String(timeoutSec), "/usr/bin/bash", path],
+      ["/usr/local/bin/timeout", "--kill-after=10", String(timeoutSec), "/usr/local/bin/bash", path],
       { cwd: "/workspace", env: { ...BASE_ENV, ...env } }
     );
     const output = await process.output();
@@ -134,7 +135,7 @@ export class ChecksSandbox extends DurableObject<Bindings> {
   private async storeKey(repo: string): Promise<string | null> {
     try {
       const process = await this.container.exec(
-        ["/usr/bin/sha256sum", "pnpm-lock.yaml"],
+        ["/usr/local/bin/sha256sum", "pnpm-lock.yaml"],
         { cwd: "/workspace", env: BASE_ENV }
       );
       const output = await process.output();
