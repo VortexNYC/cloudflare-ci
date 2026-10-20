@@ -78,6 +78,11 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
             `release failed (${result.exitCode}): ${result.stderr.slice(-2000)}`
           );
         }
+        // Success path is otherwise a black box — log the tail so the
+        // release step's curl output is inspectable in workflow logs.
+        console.log(
+          `[release] ${repo} ${tag} ok — stdout tail: ${result.stdout.slice(-1000)}`
+        );
       });
     } finally {
       await withScheduler("release", (stub) => stub.release(sandboxId)).catch(
