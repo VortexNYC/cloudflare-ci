@@ -15,6 +15,8 @@ export interface CheckTarget {
   checkNames?: string[];
   /** push event — mirror this ref to Artifacts instead of running checks. */
   mirrorRef?: string;
+  /** refs/tags/* pushes → ReleaseWorkflow (cli-binary replacement). */
+  tag?: string;
 }
 
 /** Verify X-Hub-Signature-256 against the raw body — HMAC-SHA256 hex. */
@@ -153,7 +155,11 @@ export function parseCheckEvent(
   if (event === "push") {
     const ref = str(payload.ref);
     const sha = str(payload.after);
-    if (!ref?.startsWith("refs/heads/") || !sha) return null;
+    if (!sha) return null;
+    if (ref?.startsWith("refs/tags/")) {
+      return { repo, sha, tag: ref.slice("refs/tags/".length) };
+    }
+    if (!ref?.startsWith("refs/heads/")) return null;
     const branch = ref.slice("refs/heads/".length);
     // Ignore list carried over verbatim from artifacts-sync.yml.
     if (

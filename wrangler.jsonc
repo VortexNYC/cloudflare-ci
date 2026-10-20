@@ -94,6 +94,11 @@
       "name": "cloudflare-ci-mirror",
       "binding": "MIRROR_WORKFLOW",
       "class_name": "MirrorWorkflow"
+    },
+    {
+      "name": "cloudflare-ci-release",
+      "binding": "RELEASE_WORKFLOW",
+      "class_name": "ReleaseWorkflow"
     }
   ],
   "exports": {
