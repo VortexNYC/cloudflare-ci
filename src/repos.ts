@@ -24,6 +24,12 @@ const repoConfigSchema = z.object({
   rolloutPromoteCommand: z.string().optional(),
   rolloutSteps: z.array(z.number()).optional(),
   rolloutSettleSec: z.number().default(60),
+  // VTX-584/591: staging bake on main — when set, the pipeline deploys the
+  // staging env (previewCommand's target) and probes this command before
+  // the prod rollout starts. A failed staging verify stops the run.
+  stagingVerifyCommand: z.string().optional(),
+  /** Settle time between staging deploy and its verify probe. */
+  stagingBakeSec: z.number().default(30),
   // Checks-in-pipeline: GitHub webhook events run these inside the lite
   // pool and report back via the Checks API. `command` runs in /workspace
   // after `checksInstallCommand`; env carries per-check vars (e.g.
@@ -156,6 +162,11 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       'pnpm exec wrangler versions deploy "$VID@$PCT%" -e production',
     rolloutSteps: [10, 50, 100],
     rolloutSettleSec: 90,
+    // Staging bake: previewCommand already ships -e staging; this probes it
+    // before prod traffic moves (VTX-584/591).
+    stagingVerifyCommand:
+      "curl -fsS --max-time 15 https://staging.pile.nyc/health",
+    stagingBakeSec: 45,
     // Version URLs aren't generated for DO workers, so previews are a real
     // second worker: staging.pile.nyc. env.staging shares prod data
     // bindings but has no queue consumer, no cron, no EMAIL — last branch

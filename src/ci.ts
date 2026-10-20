@@ -271,6 +271,48 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       });
     }
 
+    // Staging bake (VTX-584/591): ship the staging env, let it serve, probe
+    // it — the prod rollout only starts on a green staging verify. Previews
+    // already target this env, so the deploy shape is the preview shape.
+    if (config.previewCommand && config.stagingVerifyCommand) {
+      const stagingCommand =
+        `${npmrcCommand} && ` +
+        `${relinkCommand} && ` +
+        `${config.previewCommand}`;
+      await buildResult.runner({
+        name: "staging",
+        command: bound(stagingCommand, DEPLOY_COMMAND_TIMEOUT_MS),
+        secrets: ["NPM_TOKEN"],
+        persist: false,
+        cloudflareCredentials: {
+          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+        },
+        env: baseEnv,
+        config: {
+          timeout: DEPLOY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+        },
+      });
+      await ci.runner({
+        name: "staging-verify",
+        sandbox: "SANDBOX_LITE",
+        persist: false,
+        command:
+          `sleep ${config.stagingBakeSec} && ` +
+          bound(config.stagingVerifyCommand, VERIFY_COMMAND_TIMEOUT_MS),
+        secrets: config.verifySecrets,
+        cloudflareCredentials: {
+          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+        },
+        env: baseEnv,
+        config: {
+          timeout: VERIFY_STEP_TIMEOUT_MS + config.stagingBakeSec * 1000,
+          commandTimeoutMs:
+            VERIFY_COMMAND_TIMEOUT_MS + config.stagingBakeSec * 1000,
+        },
+      });
+    }
+
     // Same shape as preview: build's snapshot already carries dist/, so
     // deploy is install + wrangler deploy only. With a rollout configured
     // (VTX-582) the worker ships via versions upload + staged promote —
