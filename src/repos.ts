@@ -193,13 +193,11 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     releaseCommand:
       // The checks image has no bun — pnpm dlx pulls the npm package
       // (tarball, no unzip needed unlike the bun.sh installer).
-      // supported-architectures pulls the optional darwin platform deps
-      // (e.g. @opentui/core-darwin-*) pnpm would skip on a Linux host.
-      "cd /workspace && printf 'supported-architectures.os[]=linux\n" +
-      "supported-architectures.os[]=darwin\n" +
-      "supported-architectures.cpu[]=x64\n" +
-      "supported-architectures.cpu[]=arm64\n' > .npmrc && " +
+      // pnpm skips non-host optional deps (@opentui/core-darwin-*) so
+      // cross-compiles can't resolve them; adding them as direct devDeps
+      // in this throwaway clone bypasses the platform filter.
       "cd packages/cli && pnpm install --frozen-lockfile && " +
+      "pnpm add -D @opentui/core-darwin-arm64 @opentui/core-darwin-x64 && " +
       'for T in linux-x64 darwin-arm64 darwin-x64; do pnpm dlx bun build --compile --minify --target=bun-$T src/index.ts --outfile "dist/pile-$T"; done && ' +
       'RID=$(curl -sf -X POST -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/releases" ' +
       '-d "{\"tag_name\":\"$TAG\",\"generate_release_notes\":true}" | grep -oE \\"id\\":[0-9]+ | head -1 | cut -d: -f2) && ' +
