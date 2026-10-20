@@ -19,6 +19,7 @@ export type Bindings = CiBindings & {
   // push→Artifacts mirror (replaces artifacts-sync.yml): clones the pushed
   // branch and force-pushes it, firing cf.artifacts.repo.pushed downstream.
   MIRROR_WORKFLOW: Workflow;
+  RELEASE_WORKFLOW: Workflow;
   // Artifacts token minting + remote URL. ARTIFACTS_API_TOKEN is the
   // Artifacts:Write-scoped CF API token (repo tokens minted per-push are
   // TTL'd — a stored push token expires silently).

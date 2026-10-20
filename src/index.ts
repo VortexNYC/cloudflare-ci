@@ -16,6 +16,7 @@ export class CiSandboxLite extends CiSandbox {}
 export { CiSandbox, CI };
 export { ChecksSandbox };
 export { MirrorWorkflow } from "./mirror-workflow";
+export { ReleaseWorkflow } from "./release-workflow";
 
 // DirectoryBackup routes container storage traffic to this entrypoint, which
 // holds the operation's scoped grant and reads/writes the R2 bucket through
@@ -313,6 +314,17 @@ async function handleGitHubWebhook(
   // push events mirror the branch to Artifacts — the fire that replaces
   // artifacts-sync.yml. The cf.artifacts.repo.pushed event carries the
   // pipeline downstream exactly as the GHA job did.
+  if (target.tag) {
+    const id = `release-${target.repo}-${target.tag}-${target.sha.slice(0, 10)}`
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-");
+    await env.RELEASE_WORKFLOW.create({
+      id,
+      params: { repo: target.repo, tag: target.tag, sha: target.sha },
+    });
+    return Response.json({ ok: true, id, release: target.tag });
+  }
+
   if (target.mirrorRef) {
     // Workflow ids reject slashes — branches like feature/x must sanitize.
     const id =

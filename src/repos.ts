@@ -13,6 +13,9 @@ const repoConfigSchema = z.object({
   // Automated migrations for non-D1 databases (e.g. vortex PlanetScale) —
   // runs on the build snapshot so drizzle-kit resolves from node_modules.
   // Secrets arrive via migrateSecrets; interpolate them into env, not argv.
+  // VTX-603: tag-push releases — refs/tags/* on a repo with releaseCommand
+  // dispatches ReleaseWorkflow (build + publish inside a ChecksSandbox).
+  releaseCommand: z.string().optional(),
   migrateCommand: z.string().optional(),
   migrateSecrets: z.array(z.string()).default([]),
   // VTX-583: a failed verify rolls prod back to the previous deployment —
@@ -185,6 +188,16 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     // promote; deployCommand carries only the non-versioned extras (docs).
     deployCommand: "pnpm -C packages/docs run deploy",
     rollbackCommand: "pnpm exec wrangler rollback -e production",
+    // cli-v* tag pushes: cross-compile all targets from Linux (no macOS)
+    // and publish the GitHub release — replaces cli-binary.yml.
+    releaseCommand:
+      "cd packages/cli && pnpm install --frozen-lockfile && " +
+      'for T in linux-x64 darwin-arm64 darwin-x64; do bun build --compile --minify --target=bun-$T src/index.ts --outfile "dist/pile-$T"; done && ' +
+      'RID=$(curl -sf -X POST -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/releases" ' +
+      '-d "{\"tag_name\":\"$TAG\",\"generate_release_notes\":true}" | grep -oE \\"id\\":[0-9]+ | head -1 | cut -d: -f2) && ' +
+      'for F in dist/pile-*; do curl -sf -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
+      '-H "Content-Type: application/octet-stream" --data-binary "@$F" ' +
+      '"https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$(basename $F)"; done',
     rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     rolloutPromoteCommand:
       'pnpm exec wrangler versions deploy "$VID@$PCT%" -e production -y',
