@@ -78,23 +78,6 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       );
     };
 
-    const admitted = await step.do(
-      "admit",
-      { retries: { limit: 5, delay: 5_000, backoff: "linear" }, timeout: 60_000 },
-      async () => {
-        const r = await scheduler().admit({
-          pool: "SANDBOX",
-          name: sandboxId,
-          instanceId: event.instanceId,
-        });
-        return { ok: r.ok, reason: r.ok ? "" : r.reason };
-      }
-    );
-    if (!admitted.ok) {
-      await failAll("CI capacity", "The checks pool is at capacity; retry shortly.");
-      return;
-    }
-
     try {
       // PR body for checks that honor the "No tests:" escape hatch.
       const prBody = prNumber
@@ -103,67 +86,111 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           )
         : "";
 
-      // One exec for the whole run: containers do NOT survive step.do
-      // checkpoints (each sandbox.exec on a recycled sandbox returns a bare
-      // exit 1). A single shell does checkout + install + every check,
-      // delimiting each check's output and exit code with markers the
-      // parse below turns into per-check conclusions.
-      const run = await step
-        .do(
-          "run-checks",
-          {
-            // Runtime rolls during deploys interrupt in-flight execs — the
-            // script is idempotent (remote add||set-url, fetch+checkout,
-            // install), so a retry resumes where the kill left it.
-            retries: { limit: 2, delay: 15_000 },
-            timeout: 80 * MINUTE,
-          },
-          () => {
-            const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-            return sandbox.exec(buildRunScript(event.payload, config, checks), {
-              env: {
-                GITHUB_TOKEN: token,
-                NPM_TOKEN: this.env.NPM_TOKEN ?? "",
-                PR_BODY: prBody,
-                CI: "true",
-                CI_REPO: repo.split("/")[1],
-                CI_TOKEN: this.env.ADMIN_TOKEN ?? "",
-                CI_BASE: "https://cloudflare-ci.vortex-nyc.workers.dev",
+      // One sandbox + one step per check, run in parallel — wall clock is
+      // the longest check, not the sum. Each does checkout + install +
+      // its own check; the R2 pnpm-store cache keeps per-sandbox installs
+      // ~60s warm instead of ~5min cold. Runtime updates that interrupt an
+      // exec are retried — the script is idempotent.
+      interface CheckResult {
+        name: string;
+        ok?: boolean;
+        output?: string;
+        error?: string;
+      }
+      const results: CheckResult[] = await Promise.all(
+        checks.map((check): Promise<CheckResult> =>
+          step
+            .do(
+              `run-${check.name}`,
+              {
+                retries: { limit: 2, delay: 15_000 },
+                timeout: 80 * MINUTE,
               },
-              timeout: 75 * MINUTE,
-            });
-          }
+              async () => {
+                const checkSandboxId = `${sandboxId}-${check.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
+                const admission = await scheduler().admit({
+                  pool: "SANDBOX",
+                  name: checkSandboxId,
+                  instanceId: event.instanceId,
+                });
+                if (!admission.ok) {
+                  return {
+                    name: check.name,
+                    error: "CI capacity — checks pool at capacity",
+                  };
+                }
+                try {
+                  const sandbox = getSandbox(this.env.SANDBOX, checkSandboxId);
+                  const run = await sandbox.exec(
+                    buildRunScript(event.payload, config, [check]),
+                    {
+                      env: {
+                        GITHUB_TOKEN: token,
+                        NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+                        PR_BODY: prBody,
+                        CI: "true",
+                        CI_REPO: repo.split("/")[1],
+                        CI_TOKEN: this.env.ADMIN_TOKEN ?? "",
+                        CI_BASE: "https://cloudflare-ci.vortex-nyc.workers.dev",
+                      },
+                      timeout: 75 * MINUTE,
+                    }
+                  );
+                  const parsed = parseRunOutput(run);
+                  if (parsed.checkoutRc !== 0) {
+                    return {
+                      name: check.name,
+                      error: `Checkout failed: ${parsed.output.slice(-2000)}`,
+                    };
+                  }
+                  if (parsed.installRc !== 0) {
+                    return {
+                      name: check.name,
+                      error: `Install failed: ${parsed.output.slice(-2000)}`,
+                    };
+                  }
+                  const out = parsed.checks[check.name];
+                  return {
+                    name: check.name,
+                    ok: out?.rc === 0,
+                    output: (out?.output ?? "(no output)").slice(-4000),
+                  };
+                } finally {
+                  await scheduler()
+                    .release(checkSandboxId)
+                    .catch(() => {});
+                }
+              }
+            )
+            .catch((err: unknown) => ({
+              name: check.name,
+              error: `Check run error: ${String(err)}`,
+            }))
         )
-        .catch((err: unknown) => ({ __error: String(err) }));
-      if ("__error" in run) {
-        await failAll("Check run error", run.__error);
-        return;
-      }
+      );
 
-      const parsed = parseRunOutput(run);
-      if (parsed.checkoutRc !== 0) {
-        await failAll("Checkout failed", parsed.output.slice(-4000));
-        return;
-      }
-      if (parsed.installRc !== 0) {
-        await failAll("Install failed", parsed.output.slice(-4000));
-        return;
-      }
-      // Post each check's conclusion — the markers carry real per-check
-      // output even though they ran in one shell.
-      for (const check of checks) {
-        const out = parsed.checks[check.name];
-        const ok = out?.rc === 0;
-        await step.do(`report-${check.name}`, () =>
-          completeCheckRun(token, repo, runIds[check.name]!, {
-            conclusion: ok ? "success" : "failure",
-            title: ok ? `${check.name} passed` : `${check.name} failed`,
-            summary: (out?.output ?? "(no output)").slice(-4000),
-          })
-        );
+      for (const r of results) {
+        await step.do(`report-${r.name}`, () => {
+          const errored = r.error !== undefined;
+          return completeCheckRun(token, repo, runIds[r.name]!, {
+            conclusion: errored || !r.ok ? "failure" : "success",
+            title: errored
+              ? r.error!.split(":")[0]
+              : r.ok
+                ? `${r.name} passed`
+                : `${r.name} failed`,
+            summary: errored ? r.error! : (r.output ?? "(no output)"),
+          });
+        });
       }
     } finally {
-      await withScheduler("release", (stub) => stub.release(sandboxId)).catch(() => {});
+      for (const check of checks) {
+        await withScheduler(`release-${check.name}`, (stub) =>
+          stub.release(
+            `${sandboxId}-${check.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`
+          )
+        ).catch(() => {});
+      }
     }
   }
 }
