@@ -1,10 +1,10 @@
 # cloudflare-ci — Agent Operating Notes
 
-Vortex's shared CI/CD worker. One Cloudflare Worker + one Workflow + two
-container pools serving every onboarded repo. **All pipeline behavior,
-caching, dedupe, capacity, and deploy logic lives here — never work around
-CI in a consumer repo.** If a repo needs different behavior, change this
-repo or its entry in `src/repos.ts`.
+Vortex's shared CI/CD worker. One Cloudflare Worker + one Workflow +
+three container pools serving every onboarded repo. **All pipeline
+behavior, caching, dedupe, capacity, and deploy logic lives here — never
+work around CI in a consumer repo.** If a repo needs different behavior,
+change this repo or its entry in `src/repos.ts`.
 
 ## Architecture
 
@@ -38,6 +38,16 @@ repo or its entry in `src/repos.ts`.
 - `pnpm` store lives at `/workspace/.pnpm-store` so it rides snapshots;
   downstream steps relink with `--config.trustLockfile=true` (deps does
   the real lockfile verification once).
+- Checks run on `ChecksSandbox` (`src/checks-sandbox.ts`, binding
+  `CHECKS_SANDBOX`) — sandbox-sdk 1.0 under `scheduling_policy:
+  "durable_object"`, package aliased as `sandbox-1` because
+  `@cloudflare/ci` still pins sandbox 0.12 for the deploy pools. Each
+  named DO starts its own container from `Dockerfile.checks` and caches
+  the pnpm store via `DirectoryBackup` on the `BACKUP_BUCKET` binding
+  (`cache-store/` objects + `cache-idx/` records, keyed by lockfile
+  hash — no S3 credentials anywhere). **Never move an existing container
+  class to `durable_object` scheduling — that deploy is one-way. A 1.0
+  migration is always a new class + new binding alongside the old.**
 
 ## The consumer contract
 
@@ -52,7 +62,9 @@ A repo in `src/repos.ts` must:
 - `installEnv` sets `VP_GIT_HOOKS=0` so `prepare` doesn't wire hooks in
   throwaway containers.
 - Containers expose `pnpm`, `vp`, `wrangler`, `curl`, `unsquashfs` on PATH
-  (see `Dockerfile`).
+  (see `Dockerfile`). The 1.0 checks image (`Dockerfile.checks`) adds
+  `zstd` for DirectoryBackup and `sandbox-shim` — its tag must match the
+  installed `sandbox-1` version.
 
 **Do not** add GitHub Actions workflows, re-add `simple-git-hooks`, or
 hand-edit consumer configs to work around CI behavior. The pipeline shape
@@ -87,7 +99,11 @@ against cloudflare's repo when there's bandwidth.
 
 - `GET /admin/backup/:id` — streams `backups/<id>/data.sqsh` from R2,
   Range-aware (used by container restores).
-- `POST /admin/sandbox/kill` `{name}` — destroy one sandbox on both pools.
+- `GET|PUT /admin/cache/:key` — the old checks store-cache endpoint. The
+  1.0 checks path moves store archives through `DirectoryBackup` on the
+  R2 binding instead and no longer needs `CI_TOKEN`; the route stays for
+  rollback.
+- `POST /admin/sandbox/kill` `{name}` — destroy one sandbox on all pools.
 - `POST /admin/sandbox/sweep` — reap reservations >60min; returns the live
   ledger. Runs unattended hourly via cron (`17 * * * *`).
 - All admin routes: `Authorization: Bearer $ADMIN_TOKEN`, timing-safe.

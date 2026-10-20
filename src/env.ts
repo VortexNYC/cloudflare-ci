@@ -1,4 +1,5 @@
 import type { CiBindings, CiSandbox } from "@cloudflare/ci/worker";
+import type { ChecksSandbox } from "./checks-sandbox";
 import type { CiScheduler } from "./scheduler";
 
 export type Bindings = CiBindings & {
@@ -10,6 +11,8 @@ export type Bindings = CiBindings & {
   ADMIN_TOKEN?: string;
   SANDBOX_LITE: DurableObjectNamespace<CiSandbox>;
   CI_SCHEDULER: DurableObjectNamespace<CiScheduler>;
+  // sandbox-sdk 1.0 checks pool — each named DO owns its container.
+  CHECKS_SANDBOX: DurableObjectNamespace<ChecksSandbox>;
   // Checks-in-pipeline — the workflow that runs repo checks in the lite
   // pool and reports them back to GitHub via the Checks API.
   CHECKS_WORKFLOW: Workflow;

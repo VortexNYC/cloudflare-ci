@@ -25,6 +25,21 @@
       "image": "./Dockerfile",
       "max_instances": 10,
       "instance_type": "basic"
+    },
+    {
+      // Checks pool on sandbox-sdk 1.0 — each DO starts its own container.
+      // New class alongside the 0.x pools: switching an existing class to
+      // durable_object scheduling is a one-way deploy, so the checks path
+      // gets its own. The `name` is required — a DO-scheduled app can't
+      // reuse Wrangler's generated 0.x application name.
+      "class_name": "ChecksSandbox",
+      "name": "cloudflare-ci-checks-v1",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "checks": {
+          "dockerfile": "./Dockerfile.checks"
+        }
+      }
     }
   ],
   "durable_objects": {
@@ -40,6 +55,10 @@
       {
         "name": "CI_SCHEDULER",
         "class_name": "CiScheduler"
+      },
+      {
+        "name": "CHECKS_SANDBOX",
+        "class_name": "ChecksSandbox"
       }
     ]
   },
@@ -82,6 +101,10 @@
       "storage": "sqlite"
     },
     "CiScheduler": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "ChecksSandbox": {
       "type": "durable-object",
       "storage": "sqlite"
     }

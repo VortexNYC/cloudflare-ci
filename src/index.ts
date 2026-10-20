@@ -3,6 +3,7 @@ import { getSandbox } from "@cloudflare/sandbox";
 
 import { CI } from "./ci";
 import { ChecksWorkflow } from "./checks-workflow";
+import { ChecksSandbox } from "./checks-sandbox";
 import { parseCheckEvent, verifyGitHubSignature } from "./checks";
 import { getRepoConfig } from "./repos";
 import type { Bindings } from "./env";
@@ -13,6 +14,12 @@ import type { CiScheduler } from "./scheduler";
 export class CiSandboxLite extends CiSandbox {}
 
 export { CiSandbox, CI };
+export { ChecksSandbox };
+
+// DirectoryBackup routes container storage traffic to this entrypoint, which
+// holds the operation's scoped grant and reads/writes the R2 bucket through
+// the binding — no S3 credentials anywhere in the flow.
+export { DirectoryBackupGateway } from "sandbox-1";
 
 const TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;
 
@@ -190,6 +197,12 @@ async function handleSandboxKill(
     } catch (error) {
       results[binding] = error instanceof Error ? error.message : String(error);
     }
+  }
+  try {
+    await env.CHECKS_SANDBOX.getByName(name).destroy();
+    results["CHECKS_SANDBOX"] = "destroyed";
+  } catch (error) {
+    results["CHECKS_SANDBOX"] = error instanceof Error ? error.message : String(error);
   }
   return Response.json(results);
 }

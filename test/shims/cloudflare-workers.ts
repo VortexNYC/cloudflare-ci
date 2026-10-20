@@ -16,3 +16,13 @@ export class DurableObject<Env = unknown> {
     this.env = env;
   }
 }
+
+// Only needs to exist for `extends` — no test drives workflow internals.
+export class WorkflowEntrypoint<Env = unknown, Params = unknown> {
+  protected ctx: unknown;
+  protected env: Env;
+  constructor(ctx: unknown, env: Env) {
+    this.ctx = ctx;
+    this.env = env;
+  }
+}

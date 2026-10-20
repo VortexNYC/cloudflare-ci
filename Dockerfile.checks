@@ -1,0 +1,37 @@
+# ChecksSandbox image (sandbox-sdk 1.0, durable_object scheduling). Parallel
+# to ./Dockerfile, which stays on the 0.12 image for CiSandbox/CiSandboxLite
+# until @cloudflare/ci migrates. toolchain parity lives here — this is the
+# image every repo's check commands run in.
+FROM node:24-trixie-slim
+
+# pnpm + wrangler, matching the versions the 0.x image pins.
+RUN npm install -g pnpm@12.4.2 wrangler@4.133.0
+
+# Repo check toolchain: postgres-16 (vortex/veil boot it in their install
+# step), git (checkout + diff-coverage HEAD^1), make/JRE/build-essential,
+# zstd (DirectoryBackup writes tar.zst), postgres via pgdg's trixie channel.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gnupg curl \
+ && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg \
+ && echo "deb http://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update && apt-get install -y --no-install-recommends \
+    git postgresql-16 make default-jre-headless build-essential zstd \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL "https://go.dev/dl/go1.27.2.linux-$(dpkg --print-architecture).tar.gz" \
+    -o /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+
+# trufflehog 3.97.1 — matches the version vortex's trufflehog.yml pins.
+RUN ARCH="$(dpkg --print-architecture)" && curl -fsSL \
+    "https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.1/trufflehog_3.97.1_linux_${ARCH}.tar.gz" \
+    -o /tmp/trufflehog.tgz && tar -C /usr/local/bin -xzf /tmp/trufflehog.tgz trufflehog && rm /tmp/trufflehog.tgz
+
+# Files + DirectoryBackup drive the container through this helper. Its tag
+# must match the installed sandbox-1 package version.
+COPY --from=docker.io/cloudflare/sandbox:1.0.1 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+
+# container.exec({cwd}) fails to spawn when the dir doesn't exist — the
+# platform reports it as "Command `x` was not found in the container",
+# which reads like an argv[0] lookup failure but is actually the chdir.
+# /workspace is our exec cwd; the checkout script's own mkdir was too late.
+RUN mkdir -p /workspace
+
+CMD ["sleep", "infinity"]

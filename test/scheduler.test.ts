@@ -12,13 +12,26 @@ class TestScheduler extends CiScheduler {
 }
 
 function makeScheduler(storage = makeStorage()) {
-  const env = { SANDBOX: {}, SANDBOX_LITE: {} };
+  const checksDestroyed: string[] = [];
+  const env = {
+    SANDBOX: {},
+    SANDBOX_LITE: {},
+    // The 1.0 checks pool destroys through its DO stub, not getSandbox.
+    CHECKS_SANDBOX: {
+      getByName: (name: string) => ({
+        destroy: async () => {
+          checksDestroyed.push(name);
+        },
+      }),
+    },
+  };
   return {
     scheduler: new TestScheduler(
       { storage } as never,
       env as never
     ),
     storage,
+    checksDestroyed,
   };
 }
 
@@ -188,6 +201,30 @@ test("young running claims are left alone", async () => {
   await scheduler.sweep();
   const claim = await storage.get<{ status: string }>("claim/pile/feat-y");
   assert.equal(claim?.status, "running");
+});
+
+test("CHECKS pool admits have their own ledger and reap through the DO stub", async () => {
+  const { scheduler, storage, checksDestroyed } = makeScheduler();
+  for (let i = 0; i < POOL_LIMIT; i++) {
+    assert.deepEqual(
+      await scheduler.admit({ pool: "CHECKS", name: `c-${i}` }),
+      { ok: true }
+    );
+  }
+  const denied = await scheduler.admit({ pool: "CHECKS", name: "c-x" });
+  assert.equal(denied.ok, false);
+  // the 0.x pools are unaffected
+  assert.deepEqual(
+    await scheduler.admit({ pool: "SANDBOX", name: "s-0" }),
+    { ok: true }
+  );
+
+  await seedStaleReservation(storage, "stale-check", "CHECKS");
+  const out = await scheduler.sweep();
+  assert.deepEqual(out.reaped, ["stale-check"]);
+  assert.deepEqual(checksDestroyed, ["stale-check"]);
+  // the 0.x destroy path stayed untouched
+  assert.deepEqual(__hooks.destroyed, []);
 });
 
 test("fresh reservations are never reaped", async () => {
