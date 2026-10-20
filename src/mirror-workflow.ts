@@ -16,13 +16,20 @@ type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
 
 const ARTIFACTS_NS = "vortex";
 
-async function mintArtifactsToken(
+async function resolveArtifactsToken(
   env: Bindings,
   repo: string
 ): Promise<string> {
-  const apiToken = env.ARTIFACTS_API_TOKEN ?? env.CLOUDFLARE_API_TOKEN;
+  // Same two-path contract as artifacts-sync.yml: mint a 15-min repo token
+  // when a minting credential exists; otherwise use the stored push token
+  // (a long-TTL artifact, rotated before expiry).
+  if (env.ARTIFACTS_PUSH_TOKEN) return env.ARTIFACTS_PUSH_TOKEN;
+  // CF_TOKEN is the worker's existing CF API secret and covers the common
+  // case where one token has Artifacts:Write.
+  const apiToken =
+    env.ARTIFACTS_API_TOKEN ?? env.CLOUDFLARE_API_TOKEN ?? env.CF_TOKEN;
   if (!apiToken || !env.ARTIFACTS_ACCOUNT_ID) {
-    throw new Error("artifacts mirror: no ARTIFACTS_API_TOKEN/ACCOUNT_ID");
+    throw new Error("artifacts mirror: no mint token, push token, or ACCOUNT_ID");
   }
   const res = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${env.ARTIFACTS_ACCOUNT_ID}/artifacts/namespaces/${ARTIFACTS_NS}/tokens`,
@@ -77,8 +84,8 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
       throw new Error(`mirror: ${admission.reason ?? "checks pool at capacity"}`);
     }
     try {
-      const token = await step.do("mint artifacts token", () =>
-        mintArtifactsToken(this.env, repo)
+      const token = await step.do("resolve artifacts token", () =>
+        resolveArtifactsToken(this.env, repo)
       );
       await step.do("push to artifacts", async () => {
         const sandbox = this.env.CHECKS_SANDBOX.getByName(sandboxId);
