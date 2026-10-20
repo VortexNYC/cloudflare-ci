@@ -146,6 +146,30 @@ export async function createCheckRun(
   return id;
 }
 
+/** Reuse the newest check run for (sha, name) — reopened in_progress — or
+ *  create one. A refired webhook must not mint a duplicate context. */
+export async function getOrCreateCheckRun(
+  token: string,
+  repo: string,
+  sha: string,
+  name: string
+): Promise<number> {
+  const list = (await githubApi(
+    token,
+    "GET",
+    `/repos/${repo}/commits/${sha}/check-runs?check_name=${encodeURIComponent(name)}&filter=latest&per_page=1`
+  )) as { check_runs?: Array<{ id?: number }> };
+  const existing = list.check_runs?.[0]?.id;
+  if (typeof existing === "number") {
+    await githubApi(token, "PATCH", `/repos/${repo}/check-runs/${existing}`, {
+      status: "in_progress",
+      started_at: new Date().toISOString(),
+    });
+    return existing;
+  }
+  return createCheckRun(token, repo, sha, name);
+}
+
 /** Close a check run with a conclusion + bounded output. */
 export async function completeCheckRun(
   token: string,

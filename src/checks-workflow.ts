@@ -4,7 +4,7 @@ import type { Bindings } from "./env";
 import { getRepoConfig } from "./repos";
 import {
   completeCheckRun,
-  createCheckRun,
+  getOrCreateCheckRun,
   fetchPrBody,
   getInstallationToken,
   type CheckTarget,
@@ -58,10 +58,12 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       );
 
     const sandboxId = `checks-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${sha.slice(0, 10)}`;
+    // Reuse existing runs on refire — a refired webhook must not mint a
+    // duplicate context per check name.
     const runIds = await step.do("create-check-runs", async () => {
       const ids: Record<string, number> = {};
       for (const c of checks) {
-        ids[c.name] = await createCheckRun(token, repo, sha, c.name);
+        ids[c.name] = await getOrCreateCheckRun(token, repo, sha, c.name);
       }
       return ids;
     });
