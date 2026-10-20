@@ -22,8 +22,14 @@ const repoConfigSchema = z.object({
   /** Shell snippet run per percentage — must consume $VID (uploaded version
    *  id) and $PCT (step's traffic percent). */
   rolloutPromoteCommand: z.string().optional(),
-  rolloutSteps: z.array(z.number()).optional(),
-  rolloutSettleSec: z.number().default(60),
+  rolloutSteps: z
+    .array(z.number().int().min(1).max(100))
+    .optional()
+    .refine(
+      (s) => !s || s[s.length - 1] === 100,
+      "rollout steps must end at 100"
+    ),
+  rolloutSettleSec: z.number().int().min(0).default(60),
   // VTX-584/591: staging bake on main — when set, the pipeline deploys the
   // staging env (previewCommand's target) and probes this command before
   // the prod rollout starts. A failed staging verify stops the run.
