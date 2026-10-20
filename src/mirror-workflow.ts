@@ -86,12 +86,17 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
         // never interpolated into argv, where they'd land in process listings.
         const clone = [
           "set -euo pipefail",
-          'rm -rf /workspace && git clone --bare --single-branch --branch "$BRANCH"' +
-            ' "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" /workspace',
+          "git init -q --bare /workspace && cd /workspace",
+          'git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
+          // Fetch the event's SHA, not the branch tip — two overlapping
+          // pushes would otherwise let an older workflow mirror a stale tip
+          // over the newer one. GitHub permits fetching reachable SHAs.
+          // No depth bound — a shallow FETCH_HEAD can't be pushed.
+          'git fetch -q origin "$SHA"',
         ].join(" && ");
         const push = [
           "cd /workspace && git -c http.extraHeader=\"Authorization: Bearer $ARTIFACTS_TOKEN\"" +
-            ' push --force "$REMOTE" HEAD:"refs/heads/$BRANCH"',
+            ' push --force "$REMOTE" "FETCH_HEAD:refs/heads/$BRANCH"',
         ].join(" && ");
         const result = await sandbox.runCheck({
           checkoutScript: clone,
@@ -101,6 +106,7 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
             ARTIFACTS_TOKEN: token,
             REPO: repo,
             BRANCH: branch,
+            SHA: sha,
             REMOTE: `https://${this.env.ARTIFACTS_ACCOUNT_ID}.artifacts.cloudflare.net/git/${ARTIFACTS_NS}/${repoName}.git`,
             CI: "true",
           },
