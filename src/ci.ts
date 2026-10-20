@@ -29,6 +29,16 @@ const DEPLOY_COMMAND_TIMEOUT_MS = 25 * MINUTE;
 const VERIFY_STEP_TIMEOUT_MS = 6 * MINUTE;
 const VERIFY_COMMAND_TIMEOUT_MS = 5 * MINUTE;
 
+// The runner's waitForExit only arms its timeout after the log stream
+// connects — a dead stream (wedged sandbox DO, recycled isolate) leaves the
+// process running invisibly inside the container and the step hangs past its
+// bound, pinning a pool reservation for hours (the 2026-10-20 wedges). GNU
+// timeout inside the container kills the process itself: dead stream or not,
+// the step ends when the command does.
+const bound = (command: string, timeoutMs: number) =>
+  `timeout --signal=KILL --kill-after=30s ${Math.ceil(timeoutMs / 1000)} ` +
+  `bash -o pipefail -c '${command.replace(/'/g, "'\\''")}'`;
+
 // The sandbox runs every command as a wrapped subshell, so we only need the
 // shell string itself. We deliberately keep the workspace free of node_modules
 // and build artifacts before the snapshot is taken, otherwise each backup
@@ -165,7 +175,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     // downstream steps a workspace whose .pnpm-store already covers install.
     const depsResult = await ci.runner({
       name: "deps",
-      command: `${npmrcCommand} && ${installCommand} && ` + cleanupCommand,
+      command: bound(`${npmrcCommand} && ${installCommand} && ` + cleanupCommand, DEPS_COMMAND_TIMEOUT_MS),
       secrets: ["NPM_TOKEN"],
       env: config.installEnv,
       cache: {
@@ -183,7 +193,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     // dist/ to preview/deploy.
     const buildResult = await depsResult.runner({
       name: "build",
-      command: buildOnlyCommand,
+      command: bound(buildOnlyCommand, BUILD_COMMAND_TIMEOUT_MS),
       secrets: ["NPM_TOKEN", ...config.buildSecrets],
       env: baseEnv,
       config: {
@@ -218,7 +228,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
 
         await buildResult.runner({
           name: "preview",
-          command: previewCommand,
+          command: bound(previewCommand, DEPLOY_COMMAND_TIMEOUT_MS),
           secrets: ["NPM_TOKEN"],
           persist: false,
           cloudflareCredentials: {
@@ -247,7 +257,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         // perms live on CF_TOKEN_MIGRATE so each secret stays least-privilege.
         sandbox: "SANDBOX_LITE",
         persist: false,
-        command: `CLOUDFLARE_API_TOKEN="$CF_TOKEN_MIGRATE" wrangler d1 migrations apply ${config.d1Database} --env production --remote`,
+        command: bound(`CLOUDFLARE_API_TOKEN="$CF_TOKEN_MIGRATE" wrangler d1 migrations apply ${config.d1Database} --env production --remote`, MIGRATE_COMMAND_TIMEOUT_MS),
         cwd: config.d1MigrationsCwd,
         secrets: ["CF_TOKEN_MIGRATE"],
         cloudflareCredentials: {
@@ -270,7 +280,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
 
     await buildResult.runner({
       name: "deploy",
-      command: deployCommand,
+      command: bound(deployCommand, DEPLOY_COMMAND_TIMEOUT_MS),
       secrets: ["NPM_TOKEN"],
       persist: false,
       cloudflareCredentials: {
@@ -291,7 +301,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         name: "verify",
         sandbox: "SANDBOX_LITE",
         persist: false,
-        command: config.verifyCommand,
+        command: bound(config.verifyCommand, VERIFY_COMMAND_TIMEOUT_MS),
         secrets: config.verifySecrets,
         cloudflareCredentials: {
           accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
