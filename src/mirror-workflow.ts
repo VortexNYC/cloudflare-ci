@@ -12,6 +12,7 @@ import {
 import type { Bindings } from "./env";
 
 type MirrorParams = { repo: string; branch: string; sha: string };
+type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
 
 const ARTIFACTS_NS = "vortex";
 
@@ -20,7 +21,9 @@ async function mintArtifactsToken(
   repo: string
 ): Promise<string> {
   const apiToken = env.ARTIFACTS_API_TOKEN ?? env.CLOUDFLARE_API_TOKEN;
-  if (!apiToken) throw new Error("no artifacts/api token configured");
+  if (!apiToken || !env.ARTIFACTS_ACCOUNT_ID) {
+    throw new Error("artifacts mirror: no ARTIFACTS_API_TOKEN/ACCOUNT_ID");
+  }
   const res = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${env.ARTIFACTS_ACCOUNT_ID}/artifacts/namespaces/${ARTIFACTS_NS}/tokens`,
     {
@@ -48,30 +51,74 @@ async function mintArtifactsToken(
 export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
   async run(event: WorkflowEvent<MirrorParams>, step: WorkflowStep) {
     const { repo, branch, sha } = event.payload;
-    const token = await step.do("mint artifacts token", async () =>
-      mintArtifactsToken(this.env, repo)
-    );
-    await step.do("push to artifacts", async () => {
-      const sandbox = this.env.CHECKS_SANDBOX.getByName(`mirror-${sha.slice(0, 10)}`);
-      const remote = `https://${this.env.ARTIFACTS_ACCOUNT_ID}.artifacts.cloudflare.net/git/${ARTIFACTS_NS}/${repo.split("/")[1]}.git`;
-      // Clone the pushed ref from GitHub, then force-push it to Artifacts —
-      // rebased/rewritten branches must still sync, same as the old job.
-      const script = [
-        "set -euo pipefail",
-        "rm -rf /tmp/mirror && git clone --bare --single-branch --branch " +
-          JSON.stringify(branch) +
-          ` https://x-access-token:${this.env.CHECKS_GITHUB_TOKEN}@github.com/${repo}.git /tmp/mirror`,
-        `cd /tmp/mirror && git -c http.extraHeader="Authorization: Bearer ${token}" push --force ${JSON.stringify(remote)} HEAD:refs/heads/${JSON.stringify(branch)}`,
-      ].join(" && ");
-      const result = await sandbox.runCheck({
-        checkoutScript: "true",
-        script,
-        env: {},
-        timeoutSec: 300,
+    const repoName = repo.split("/")[1] ?? repo;
+    const scheduler = () =>
+      this.env.CI_SCHEDULER.get(this.env.CI_SCHEDULER.idFromName("global"));
+    const withScheduler = <T extends Rpc.Serializable<T>>(
+      name: string,
+      fn: (stub: SchedulerStub) => Promise<T>
+    ): Promise<T> =>
+      step.do(
+        name,
+        { retries: { limit: 5, delay: 5_000, backoff: "linear" }, timeout: 60_000 },
+        () => fn(scheduler())
+      );
+
+    const sandboxId = `mirror-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${sha.slice(0, 10)}`;
+    const admission = await withScheduler("admit", async (stub) => {
+      const res = await stub.admit({
+        pool: "CHECKS",
+        name: sandboxId,
+        instanceId: event.instanceId,
       });
-      if (result.exitCode !== 0) {
-        throw new Error(`mirror push failed (${result.exitCode}): ${result.stderr}`);
-      }
+      return { ok: res.ok, reason: "reason" in res ? res.reason : undefined };
     });
+    if (!admission.ok) {
+      throw new Error(`mirror: ${admission.reason ?? "checks pool at capacity"}`);
+    }
+    try {
+      const token = await step.do("mint artifacts token", () =>
+        mintArtifactsToken(this.env, repo)
+      );
+      await step.do("push to artifacts", async () => {
+        const sandbox = this.env.CHECKS_SANDBOX.getByName(sandboxId);
+        // Tokens ride the container env (GITHUB_TOKEN / ARTIFACTS_TOKEN) —
+        // never interpolated into argv, where they'd land in process listings.
+        const clone = [
+          "set -euo pipefail",
+          'rm -rf /workspace && git clone --bare --single-branch --branch "$BRANCH"' +
+            ' "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" /workspace',
+        ].join(" && ");
+        const push = [
+          "cd /workspace && git -c http.extraHeader=\"Authorization: Bearer $ARTIFACTS_TOKEN\"" +
+            ' push --force "$REMOTE" HEAD:"refs/heads/$BRANCH"',
+        ].join(" && ");
+        const result = await sandbox.runCheck({
+          checkoutScript: clone,
+          script: push,
+          env: {
+            GITHUB_TOKEN: this.env.CHECKS_GITHUB_TOKEN ?? "",
+            ARTIFACTS_TOKEN: token,
+            REPO: repo,
+            BRANCH: branch,
+            REMOTE: `https://${this.env.ARTIFACTS_ACCOUNT_ID}.artifacts.cloudflare.net/git/${ARTIFACTS_NS}/${repoName}.git`,
+            CI: "true",
+          },
+          timeoutSec: 300,
+        });
+        if (result.exitCode !== 0) {
+          throw new Error(
+            `mirror push failed (${result.exitCode}): ${result.stderr.slice(-2000)}`
+          );
+        }
+      });
+    } finally {
+      await withScheduler("release", (stub) => stub.release(sandboxId)).catch(
+        () => {}
+      );
+      await this.env.CHECKS_SANDBOX.getByName(sandboxId)
+        .destroy()
+        .catch(() => {});
+    }
   }
 }
