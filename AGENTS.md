@@ -119,6 +119,28 @@ against cloudflare's repo when there's bandwidth.
 - Stuck run: `wrangler workflows instances terminate cloudflare-ci <id>`,
   then `/admin/sandbox/sweep` to release its reservation.
 
+## Deployment maturity model (VTX-587)
+
+Every onboarded repo sits on a stage; the config keys in `src/repos.ts`
+move it forward:
+
+- **Stage 0 — checks only.** No `buildCommand`; the checks pool runs the
+  repo's checks (`checks[]` + platform `baselineChecks`, merged by name).
+- **Stage 1 — deploy.** `buildCommand`/`deployCommand` ship `main`; every
+  command is GNU-timeout-bounded inside the container.
+- **Stage 2 — gated.** `verifyCommand` probes prod post-deploy;
+  `rollbackCommand` (`wrangler rollback`) restores the previous deployment
+  on failure.
+- **Stage 3 — staged.** `previewCommand` + `stagingVerifyCommand` add a
+  staging bake before prod; `rolloutUpload/Promote/Steps` ship via
+  `wrangler versions` in traffic stages instead of a 0→100 cut.
+- **Stage 4 — watched.** `watchCommand` polls a repo-owned error/SLO
+  probe post-rollout; a breach triggers rollback automatically.
+- **Secrets at every stage:** `buildSecrets`, `verifySecrets`,
+  `deploySecrets` inject named worker secrets into the right step only.
+
+pile is Stage 4: staging bake + staged rollout + verify + watch + rollback.
+
 ## Hard rules
 
 - pnpm only. No `any`, no `eslint-disable`. `npx tsc --noEmit -p .` before
