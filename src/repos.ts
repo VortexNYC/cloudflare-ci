@@ -10,6 +10,11 @@ const repoConfigSchema = z.object({
   // Optional for checks-only repos (veil flips before its deploy path).
   buildCommand: z.string().optional(),
   deployCommand: z.string().optional(),
+  // Automated migrations for non-D1 databases (e.g. vortex PlanetScale) —
+  // runs on the build snapshot so drizzle-kit resolves from node_modules.
+  // Secrets arrive via migrateSecrets; interpolate them into env, not argv.
+  migrateCommand: z.string().optional(),
+  migrateSecrets: z.array(z.string()).default([]),
   // VTX-583: a failed verify rolls prod back to the previous deployment —
   // typically `wrangler rollback -e production`. Absent disables rollback.
   rollbackCommand: z.string().optional(),
@@ -230,6 +235,12 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
 
   vortex: {
     name: "vortex",
+    // Automated PlanetScale migrations (replaces the manual `pscale role
+    // reset` + `db:migrate` runbook): the migrate step runs off the deps
+    // snapshot — vortex has no build/deploy path onboarded yet.
+    migrateCommand:
+      'DATABASE_URL="$VORTEX_MIGRATE_URL" pnpm --filter @vortexnyc/money-kernel db:migrate',
+    migrateSecrets: ["VORTEX_MIGRATE_URL"],
     checksInstallCommand:
       '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
       'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +

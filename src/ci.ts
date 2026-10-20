@@ -88,8 +88,10 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     const config = getRepoConfig(repo);
 
     // Checks-only repos (no build/deploy yet) ride the checks workflow —
-    // nothing to ship here.
-    if (config && !config.buildCommand) {
+    // nothing to ship here. A repo with migrateCommand but no buildCommand
+    // still runs its migration on the deps snapshot — automate-first, the
+    // deploy path can onboard later.
+    if (config && !config.buildCommand && !config.migrateCommand) {
       console.log(`[cloudflare-ci] ${String(repo)} is checks-only — skipping deploy pipeline`);
       return;
     }
@@ -190,17 +192,20 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     // CI exists to produce and ship deployable artifacts — everything that
     // can gate locally (check/test via pre-push hooks) stays out of billable
     // containers. build is the only persisted step: its snapshot carries
-    // dist/ to preview/deploy.
-    const buildResult = await depsResult.runner({
-      name: "build",
-      command: bound(buildOnlyCommand, BUILD_COMMAND_TIMEOUT_MS),
-      secrets: ["NPM_TOKEN", ...config.buildSecrets],
-      env: baseEnv,
-      config: {
-        timeout: BUILD_STEP_TIMEOUT_MS,
-        commandTimeoutMs: BUILD_COMMAND_TIMEOUT_MS,
-      },
-    });
+    // dist/ to preview/deploy. Migrate-only repos (no buildCommand) skip
+    // straight to the deps snapshot for their migrate step.
+    const buildResult = config.buildCommand
+      ? await depsResult.runner({
+          name: "build",
+          command: bound(buildOnlyCommand, BUILD_COMMAND_TIMEOUT_MS),
+          secrets: ["NPM_TOKEN", ...config.buildSecrets],
+          env: baseEnv,
+          config: {
+            timeout: BUILD_STEP_TIMEOUT_MS,
+            commandTimeoutMs: BUILD_COMMAND_TIMEOUT_MS,
+          },
+        })
+      : depsResult;
 
     winner = await supersededBy("dedupe-recheck");
     if (winner) {
@@ -248,7 +253,28 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       return;
     }
 
-    if (config.d1Database) {
+    if (config.migrateCommand) {
+      // Non-D1 migrations (PlanetScale etc.) run on the build snapshot —
+      // the migrate tool resolves from node_modules. Migrate-only repos
+      // fall back to the deps snapshot.
+      await buildResult.runner({
+        name: "migrate",
+        command: bound(
+          `${npmrcCommand} && ${relinkCommand} && ${config.migrateCommand}`,
+          MIGRATE_COMMAND_TIMEOUT_MS
+        ),
+        secrets: ["NPM_TOKEN", ...config.migrateSecrets],
+        persist: false,
+        cloudflareCredentials: {
+          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+        },
+        env: baseEnv,
+        config: {
+          timeout: MIGRATE_STEP_TIMEOUT_MS,
+          commandTimeoutMs: MIGRATE_COMMAND_TIMEOUT_MS,
+        },
+      });
+    } else if (config.d1Database) {
       await ci.runner({
         name: "migrate",
         // One wrangler CLI call on a fresh checkout — no restore, no install,
