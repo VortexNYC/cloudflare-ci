@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  getOrCreateCheckRun,
   parseCheckEvent,
   verifyGitHubSignature,
 } from "../src/checks.ts";
@@ -143,4 +144,55 @@ test("buildRunScript passes per-check env through the timeout wrapper", () => {
   assert.match(script, /timeout --kill-after=10 60 bash -c 'export DIFF_COVERAGE_BASE=/);
   assert.ok(script.includes("HEAD^1"));
   assert.match(script, /; vp run diff-coverage' > \/tmp\/check-diff\.out 2>&1/);
+});
+
+test("getOrCreateCheckRun reopens an existing run instead of duplicating", async () => {
+  const calls: Array<{ method: string; url: string }> = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push({ method: init?.method ?? "GET", url });
+    if (url.includes("/check-runs?")) {
+      return new Response(
+        JSON.stringify({ total_count: 1, check_runs: [{ id: 4242 }] }),
+        { status: 200 }
+      );
+    }
+    return new Response("{}", { status: 200 });
+  };
+  try {
+    const id = await getOrCreateCheckRun("t", "VortexNYC/pile", "abc123", "ci");
+    assert.equal(id, 4242);
+    assert.deepEqual(
+      calls.map((c) => `${c.method} ${new URL(c.url).pathname}`),
+      [
+        "GET /repos/VortexNYC/pile/commits/abc123/check-runs",
+        "PATCH /repos/VortexNYC/pile/check-runs/4242",
+      ]
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("getOrCreateCheckRun creates when no run exists for the name", async () => {
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
+    return new Response(JSON.stringify({ check_runs: [], id: 77 }), {
+      status: 201,
+    });
+  };
+  try {
+    const id = await getOrCreateCheckRun("t", "VortexNYC/pile", "abc123", "ci");
+    assert.equal(id, 77);
+    assert.deepEqual(calls, [
+      "GET /repos/VortexNYC/pile/commits/abc123/check-runs",
+      "POST /repos/VortexNYC/pile/check-runs",
+    ]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
