@@ -42,12 +42,12 @@ change this repo or its entry in `src/repos.ts`.
   `CHECKS_SANDBOX`) — sandbox-sdk 1.0 under `scheduling_policy:
   "durable_object"`, package aliased as `sandbox-1` because
   `@cloudflare/ci` still pins sandbox 0.12 for the deploy pools. Each
-  named DO starts its own container from `Dockerfile.checks` and mounts
-  the backups bucket's `cache/` prefix via `S3Mount` (signed by
-  `S3Gateway`; `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` are
-  `secrets.required`). **Never move an existing container class to
-  `durable_object` scheduling — that deploy is one-way. A 1.0 migration
-  is always a new class + new binding alongside the old.**
+  named DO starts its own container from `Dockerfile.checks` and caches
+  the pnpm store via `DirectoryBackup` on the `BACKUP_BUCKET` binding
+  (`cache-store/` objects + `cache-idx/` records, keyed by lockfile
+  hash — no S3 credentials anywhere). **Never move an existing container
+  class to `durable_object` scheduling — that deploy is one-way. A 1.0
+  migration is always a new class + new binding alongside the old.**
 
 ## The consumer contract
 
@@ -63,7 +63,7 @@ A repo in `src/repos.ts` must:
   throwaway containers.
 - Containers expose `pnpm`, `vp`, `wrangler`, `curl`, `unsquashfs` on PATH
   (see `Dockerfile`). The 1.0 checks image (`Dockerfile.checks`) adds
-  `fuse3`/`s3fs` for S3Mount and `sandbox-shim` — its tag must match the
+  `zstd` for DirectoryBackup and `sandbox-shim` — its tag must match the
   installed `sandbox-1` version.
 
 **Do not** add GitHub Actions workflows, re-add `simple-git-hooks`, or
@@ -100,8 +100,9 @@ against cloudflare's repo when there's bandwidth.
 - `GET /admin/backup/:id` — streams `backups/<id>/data.sqsh` from R2,
   Range-aware (used by container restores).
 - `GET|PUT /admin/cache/:key` — the old checks store-cache endpoint. The
-  1.0 checks path reads/writes `cache/<key>` through an S3Mount instead
-  and no longer needs `CI_TOKEN`; the route stays for rollback.
+  1.0 checks path moves store archives through `DirectoryBackup` on the
+  R2 binding instead and no longer needs `CI_TOKEN`; the route stays for
+  rollback.
 - `POST /admin/sandbox/kill` `{name}` — destroy one sandbox on all pools.
 - `POST /admin/sandbox/sweep` — reap reservations >60min; returns the live
   ledger. Runs unattended hourly via cron (`17 * * * *`).

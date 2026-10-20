@@ -4,7 +4,10 @@ import {
   parseCheckEvent,
   verifyGitHubSignature,
 } from "../src/checks.ts";
-import { buildRunScript } from "../src/checks-workflow.ts";
+import {
+  buildCheckoutScript,
+  buildRunScript,
+} from "../src/checks-workflow.ts";
 
 async function sign(secret: string, body: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -97,61 +100,46 @@ test("parseCheckEvent: unrelated events return null", () => {
   assert.equal(parseCheckEvent("pull_request", null), null);
 });
 
-test("buildRunScript uses the mounted cache prefix — no worker creds in-sandbox", () => {
+test("buildRunScript carries no cache transport or worker creds", () => {
   const script = buildRunScript(
-    { repo: "VortexNYC/pile", sha: "abc123" },
     { checksInstallCommand: "pnpm install --frozen-lockfile" },
     [{ name: "ci", command: "pnpm check" }]
   );
-  // S3Mount path, not the retired /admin/cache curl + CI_TOKEN path.
-  assert.match(script, /\$CI_CACHE\/\$STORE_KEY/);
-  assert.doesNotMatch(script, /CI_TOKEN|CI_BASE|admin\/cache|curl /);
-  // store still lands in /tmp/.pnpm-store for --store-dir installs
-  assert.match(script, /tar -xzf "\$CI_CACHE\/\$STORE_KEY" -C \/tmp\/\.pnpm-store/);
-  assert.match(script, /cp \/tmp\/store-new\.tgz "\$CI_CACHE\/\$STORE_KEY"/);
+  // Store seed/upload lives in the DO (DirectoryBackup on the R2 binding);
+  // the script only marks a good install for the backup pass.
+  assert.doesNotMatch(script, /CI_TOKEN|CI_BASE|CI_CACHE|STORE_KEY|admin\/cache|curl /);
+  assert.match(script, /touch \/tmp\/\.install-ok/);
 });
 
-test("buildRunScript fetches pull/N/head for PR events, sha otherwise", () => {
-  const pr = buildRunScript(
-    { repo: "VortexNYC/pile", sha: "abc123", prNumber: 42 },
-    {},
-    []
-  );
+test("buildCheckoutScript fetches pull/N/head for PR events, sha otherwise", () => {
+  const pr = buildCheckoutScript({
+    repo: "VortexNYC/pile",
+    sha: "abc123",
+    prNumber: 42,
+  });
   assert.match(pr, /git fetch -q --depth 50 origin pull\/42\/head/);
-  const push = buildRunScript(
-    { repo: "VortexNYC/pile", sha: "abc123" },
-    {},
-    []
-  );
+  const push = buildCheckoutScript({ repo: "VortexNYC/pile", sha: "abc123" });
   assert.match(push, /git fetch -q --depth 50 origin abc123/);
 });
 
 test("buildRunScript wraps timeoutMs checks in GNU timeout, others plain", () => {
-  const script = buildRunScript(
-    { repo: "VortexNYC/pile", sha: "abc123" },
-    {},
-    [
-      { name: "bounded", command: "pnpm test", timeoutMs: 10 * 60 * 1000 },
-      { name: "unbounded", command: "pnpm lint" },
-    ]
-  );
+  const script = buildRunScript({}, [
+    { name: "bounded", command: "pnpm test", timeoutMs: 10 * 60 * 1000 },
+    { name: "unbounded", command: "pnpm lint" },
+  ]);
   assert.match(script, /timeout --kill-after=10 600 bash -c 'pnpm test' > \/tmp\/check-bounded\.out/);
   assert.match(script, /^bash -c 'pnpm lint' > \/tmp\/check-unbounded\.out 2>&1$/m);
 });
 
 test("buildRunScript passes per-check env through the timeout wrapper", () => {
-  const script = buildRunScript(
-    { repo: "VortexNYC/pile", sha: "abc123" },
-    {},
-    [
-      {
-        name: "diff",
-        command: "vp run diff-coverage",
-        env: { DIFF_COVERAGE_BASE: "HEAD^1" },
-        timeoutMs: 60_000,
-      },
-    ]
-  );
+  const script = buildRunScript({}, [
+    {
+      name: "diff",
+      command: "vp run diff-coverage",
+      env: { DIFF_COVERAGE_BASE: "HEAD^1" },
+      timeoutMs: 60_000,
+    },
+  ]);
   assert.match(script, /timeout --kill-after=10 60 bash -c 'export DIFF_COVERAGE_BASE=/);
   assert.ok(script.includes("HEAD^1"));
   assert.match(script, /; vp run diff-coverage' > \/tmp\/check-diff\.out 2>&1/);

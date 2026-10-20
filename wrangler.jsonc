@@ -120,16 +120,7 @@
     // Containers fetch restore archives over HTTP from this worker instead of
     // streaming through the DO isolate (which OOMs on large snapshots).
     "BACKUP_DOWNLOAD_BASE_URL": "https://cloudflare-ci.vortex-nyc.workers.dev",
-    "CLOUDFLARE_ACCOUNT_ID": "953346ce1b4f27fa04a76d83aeccab28",
-    // S3Mount source for the checks store cache — same bucket as
-    // BACKUP_BUCKET, scoped to the cache/ prefix at mount time.
-    "S3_ENDPOINT": "https://953346ce1b4f27fa04a76d83aeccab28.r2.cloudflarestorage.com",
-    "S3_BUCKET": "cloudflare-ci-backups"
-  },
-  "secrets": {
-    // R2 API token (Object Read & Write on the backups bucket) — S3Gateway
-    // holds these in the Worker and signs container storage requests.
-    "required": ["S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"]
+    "CLOUDFLARE_ACCOUNT_ID": "953346ce1b4f27fa04a76d83aeccab28"
   },
   "observability": {
     "enabled": true,

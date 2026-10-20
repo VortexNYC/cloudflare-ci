@@ -16,10 +16,10 @@ export class CiSandboxLite extends CiSandbox {}
 export { CiSandbox, CI };
 export { ChecksSandbox };
 
-// S3Mount routes container storage requests to this entrypoint, which checks
-// them against the mount's bucket/prefix/access and signs them with the R2
-// credentials held in Worker secrets.
-export { S3Gateway } from "sandbox-1";
+// DirectoryBackup routes container storage traffic to this entrypoint, which
+// holds the operation's scoped grant and reads/writes the R2 bucket through
+// the binding — no S3 credentials anywhere in the flow.
+export { DirectoryBackupGateway } from "sandbox-1";
 
 const TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;
 

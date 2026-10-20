@@ -122,19 +122,24 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 }
                 const sandbox = this.env.CHECKS_SANDBOX.getByName(checkSandboxId);
                 try {
-                  // Flat 75min bound on the whole script (checkout+install+
-                  // check); check.timeoutMs bounds the check command itself
-                  // inside the script — a cold install can't eat its budget.
+                  // Flat 75min bound on install+check; check.timeoutMs bounds
+                  // the check command itself inside the script — a cold
+                  // install can't eat its budget. The store cache (a
+                  // DirectoryBackup on the R2 binding) keys off the lockfile
+                  // hash — the DO computes it after checkout.
                   const run = await sandbox.runCheck({
-                    script: buildRunScript(event.payload, config, [check]),
+                    checkoutScript: buildCheckoutScript(event.payload),
+                    script: buildRunScript(config, [check]),
                     env: {
                       GITHUB_TOKEN: token,
                       NPM_TOKEN: this.env.NPM_TOKEN ?? "",
                       PR_BODY: prBody,
                       CI: "true",
-                      CI_REPO: repo.split("/")[1],
                     },
                     timeoutSec: 75 * 60,
+                    cacheRepo: config.checksInstallCommand
+                      ? repo.split("/")[1]
+                      : undefined,
                   });
                   const parsed = parseRunOutput(run);
                   if (parsed.checkoutRc !== 0) {
@@ -203,13 +208,30 @@ interface RepoConfigShape {
   checksInstallCommand?: string;
 }
 
+export function buildCheckoutScript(payload: {
+  repo: string;
+  sha: string;
+  headRef?: string;
+  prNumber?: number;
+}): string {
+  // PR heads fetch via the stable pull/N/head ref — a raw sha becomes
+  // unreachable after a force-push and GitHub refuses the sha-in-want.
+  // merge_queue/check_suite events keep sha fetch (always reachable).
+  const fetchRef = payload.prNumber
+    ? `pull/${payload.prNumber}/head`
+    : payload.headRef ?? payload.sha;
+  return [
+    "set +e",
+    "mkdir -p /workspace && cd /workspace",
+    "git init -q .",
+    `git remote add origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git 2>/dev/null || ` +
+      `git remote set-url origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git`,
+    `git fetch -q --depth 50 origin ${fetchRef} && git checkout -q ${payload.sha}`,
+    "echo ===CI:CHECKOUT:RC=$?===",
+  ].join("\n");
+}
+
 export function buildRunScript(
-  payload: {
-    repo: string;
-    sha: string;
-    headRef?: string;
-    prNumber?: number;
-  },
   config: RepoConfigShape,
   checks: Array<{
     name: string;
@@ -218,40 +240,18 @@ export function buildRunScript(
     timeoutMs?: number;
   }>
 ): string {
-  // PR heads fetch via the stable pull/N/head ref — a raw sha becomes
-  // unreachable after a force-push and GitHub refuses the sha-in-want.
-  // merge_queue/check_suite events keep sha fetch (always reachable).
-  const fetchRef = payload.prNumber
-    ? `pull/${payload.prNumber}/head`
-    : payload.headRef ?? payload.sha;
-  const lines: string[] = [
-    "set +e",
-    "mkdir -p /workspace && cd /workspace",
-    "git init -q .",
-    `git remote add origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git 2>/dev/null || ` +
-      `git remote set-url origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git`,
-    `git fetch -q --depth 50 origin ${fetchRef} && git checkout -q ${payload.sha}`,
-    "echo ===CI:CHECKOUT:RC=$?===",
-  ];
+  const lines: string[] = ["set +e"];
   if (config.checksInstallCommand) {
     lines.push(
-      // Seed the pnpm store from R2 (keyed by lockfile hash) — a cold
-      // install re-downloads every package; a warm one is ~30-60s. The
-      // bucket's cache/ prefix is mounted at $CI_CACHE by ChecksSandbox;
-      // absent or unset, the install just runs cold.
-      'STORE_KEY="pnpm-$CI_REPO-$(sha256sum pnpm-lock.yaml 2>/dev/null | cut -d\' \' -f1 || echo nolock)"',
+      // Install into the (possibly restored) store at /tmp/.pnpm-store.
+      // The sentinel tells ChecksSandbox the store is worth backing up —
+      // seed/upload themselves live in the DO, not the script.
       'mkdir -p /tmp/.pnpm-store',
-      '[ -n "$CI_CACHE" ] && [ -f "$CI_CACHE/$STORE_KEY" ] ' +
-        '&& tar -xzf "$CI_CACHE/$STORE_KEY" -C /tmp/.pnpm-store 2>/dev/null ' +
-        '|| true',
       `{ ${config.checksInstallCommand}; } > /tmp/install.out 2>&1`,
       "rc=$?",
       "tail -c 3500 /tmp/install.out",
       "echo ===CI:INSTALL:RC=$rc===",
-      // Upload the store back (best-effort — failures are not fatal)
-      '[ "$rc" = "0" ] && [ -n "$CI_CACHE" ] && ' +
-        'tar -czf /tmp/store-new.tgz -C /tmp .pnpm-store ' +
-        '&& cp /tmp/store-new.tgz "$CI_CACHE/$STORE_KEY" || true'
+      '[ "$rc" = "0" ] && touch /tmp/.install-ok'
     );
   } else {
     lines.push("echo ===CI:INSTALL:RC=0===");
