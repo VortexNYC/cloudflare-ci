@@ -92,8 +92,16 @@ export class ChecksSandbox extends DurableObject<Bindings> {
 
   private async startContainer(): Promise<void> {
     if (!this.container.running) {
+      const image = this.container.images["checks"];
+      console.log(
+        "ChecksSandbox: starting container",
+        JSON.stringify(this.container.images)
+      );
+      if (!image) {
+        throw new Error("ChecksSandbox: no 'checks' image registered");
+      }
       this.container.start({
-        image: this.container.images["checks"]!,
+        image,
         instance: "standard-2",
         enableInternet: true,
       });
