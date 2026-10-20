@@ -28,6 +28,14 @@ const CHECKOUT_TIMEOUT_SEC = 15 * 60;
 // for a run that dies without its finally.
 const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
 
+// container.exec's argv[0] must be a STATIC binary on this platform —
+// execve surfaces a missing dynamic interpreter as "Command `x` was not
+// found in the container" (that's why only /usr/local/bin/sandbox-shim,
+// a static ELF, ever resolves). busybox-static gives us a static entrypoint
+// that execs the real dynamically-linked tools in the container's normal
+// environment, where PATH and the loader work as usual.
+const BUSYBOX = "/usr/bin/busybox";
+
 // exec() processes do not see Dockerfile ENV on 1.0 — PATH/HOME ship on every
 // exec call. PATH covers the go toolchain and the npm-globals layer.
 const BASE_ENV: Record<string, string> = {
@@ -122,11 +130,10 @@ export class ChecksSandbox extends DurableObject<Bindings> {
   ): Promise<ChecksRunResult> {
     await this.files.writeFile(path, script);
     // GNU timeout kills the process group — an AbortSignal would orphan the
-    // script's children. Exit code 124 means the bound was hit. argv[0] lives
-    // in /usr/local/bin: container.exec resolves commands against the shim's
-    // PATH view, not the image's full PATH.
+    // script's children. Exit code 124 means the bound was hit. argv[0] is
+    // static busybox; the real timeout+bash run inside the container.
     const process = await this.container.exec(
-      ["/usr/local/bin/timeout", "--kill-after=10", String(timeoutSec), "/usr/local/bin/bash", path],
+      [BUSYBOX, "sh", "-c", `exec timeout --kill-after=10 ${timeoutSec} bash ${path}`],
       { cwd: "/workspace", env: { ...BASE_ENV, ...env } }
     );
     const output = await process.output();
@@ -143,7 +150,7 @@ export class ChecksSandbox extends DurableObject<Bindings> {
   private async storeKey(repo: string): Promise<string | null> {
     try {
       const process = await this.container.exec(
-        ["/usr/local/bin/sha256sum", "pnpm-lock.yaml"],
+        [BUSYBOX, "sh", "-c", "exec sha256sum pnpm-lock.yaml"],
         { cwd: "/workspace", env: BASE_ENV }
       );
       const output = await process.output();

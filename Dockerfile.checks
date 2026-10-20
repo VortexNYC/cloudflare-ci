@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg \
  && echo "deb http://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update && apt-get install -y --no-install-recommends \
-    git postgresql-16 make default-jre-headless build-essential zstd \
+    git postgresql-16 make default-jre-headless build-essential zstd busybox-static \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL "https://go.dev/dl/go1.27.2.linux-$(dpkg --print-architecture).tar.gz" \
     -o /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
@@ -28,8 +28,9 @@ RUN ARCH="$(dpkg --print-architecture)" && curl -fsSL \
 # must match the installed sandbox-1 package version.
 COPY --from=docker.io/cloudflare/sandbox:1.0.1 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 
-# container.exec resolves argv[0] against the shim's PATH view, which sees
-# /usr/local/bin — mirror the binaries we exec directly there.
-RUN cp /usr/bin/timeout /usr/bin/sha256sum /usr/bin/bash /usr/local/bin/
+# container.exec's argv[0] must be a STATIC binary — the platform's execve
+# path can't load dynamic ELF interpreters (that's why only the static
+# sandbox-shim ever resolved). busybox-static is our static entrypoint;
+# it execs the real tools inside the container's normal environment.
 
 CMD ["sleep", "infinity"]
