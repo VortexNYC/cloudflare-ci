@@ -191,6 +191,9 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     // cli-v* tag pushes: cross-compile all targets from Linux (no macOS)
     // and publish the GitHub release — replaces cli-binary.yml.
     releaseCommand:
+      // The checks image has no bun — install it into the run's HOME.
+      "curl -fsSL https://bun.sh/install | bash && " +
+      'export PATH="$HOME/.bun/bin:$PATH" && ' +
       "cd packages/cli && pnpm install --frozen-lockfile && " +
       'for T in linux-x64 darwin-arm64 darwin-x64; do bun build --compile --minify --target=bun-$T src/index.ts --outfile "dist/pile-$T"; done && ' +
       'RID=$(curl -sf -X POST -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/releases" ' +
