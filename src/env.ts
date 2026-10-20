@@ -29,7 +29,6 @@ export type Bindings = CiBindings & {
   ARTIFACTS_PUSH_TOKEN?: string;
   CLOUDFLARE_API_TOKEN?: string;
   CF_TOKEN?: string;
-  CLOUDFLARE_API_TOKEN?: string;
   // GitHub-side auth for the checks path. CHECKS_GITHUB_TOKEN mints
   // check-runs + reads PRs; GITHUB_WEBHOOK_SECRET verifies inbound
   // webhook signatures.
