@@ -30,6 +30,6 @@ COPY --from=docker.io/cloudflare/sandbox:1.0.1 /usr/local/bin/sandbox-shim /usr/
 
 # container.exec resolves argv[0] against the shim's PATH view, which sees
 # /usr/local/bin — mirror the binaries we exec directly there.
-RUN ln -sf /usr/bin/timeout /usr/bin/sha256sum /usr/bin/bash /usr/local/bin/
+RUN cp /usr/bin/timeout /usr/bin/sha256sum /usr/bin/bash /usr/local/bin/
 
 CMD ["sleep", "infinity"]
