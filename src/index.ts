@@ -15,6 +15,7 @@ export class CiSandboxLite extends CiSandbox {}
 
 export { CiSandbox, CI };
 export { ChecksSandbox };
+export { MirrorWorkflow } from "./mirror-workflow";
 
 // DirectoryBackup routes container storage traffic to this entrypoint, which
 // holds the operation's scoped grant and reads/writes the R2 bucket through
@@ -309,12 +310,34 @@ async function handleGitHubWebhook(
   );
   if (!target) return Response.json({ ok: true, skipped: event });
 
+  // push events mirror the branch to Artifacts — the fire that replaces
+  // artifacts-sync.yml. The cf.artifacts.repo.pushed event carries the
+  // pipeline downstream exactly as the GHA job did.
+  if (target.mirrorRef) {
+    const id = `mirror-${target.repo.replace("/", "-")}-${target.mirrorRef}-${target.sha.slice(0, 10)}`;
+    await env.MIRROR_WORKFLOW.create({
+      id,
+      params: { repo: target.repo, branch: target.mirrorRef, sha: target.sha },
+    });
+    return Response.json({ ok: true, id, mirrored: target.mirrorRef });
+  }
+
   const config = getRepoConfig(target.repo.split("/")[1] ?? "");
   if (!config || config.checks.length === 0) {
     return Response.json({ ok: true, skipped: `no checks for ${target.repo}` });
   }
+  const params = { ...target, checkNames: target.checkNames };
+  if (target.edited) {
+    // Body edits exist to re-fire the "No tests:" escape hatch — re-running
+    // checks that never read PR_BODY on every title edit just burns the pool.
+    const names = config.checks.filter((c) => c.usesPrBody).map((c) => c.name);
+    if (names.length === 0) {
+      return Response.json({ ok: true, skipped: `edited: no PR-body checks for ${target.repo}` });
+    }
+    params.checkNames = names;
+  }
   const id = `checks-${target.repo.replace("/", "-")}-${target.sha.slice(0, 10)}-${Date.now()}`;
-  await env.CHECKS_WORKFLOW.create({ id, params: target });
+  await env.CHECKS_WORKFLOW.create({ id, params });
   return Response.json({ ok: true, id });
 }
 

@@ -7,6 +7,14 @@ export interface CheckTarget {
   sha: string;
   prNumber?: number;
   headRef?: string;
+  /** merge_group.base_sha — the base tip the group's diff is measured against. */
+  baseSha?: string;
+  /** PR body/title edit — only checks that consume the PR body should re-run. */
+  edited?: boolean;
+  /** check_run.rerequested — re-run only this check name, not the whole set. */
+  checkNames?: string[];
+  /** push event — mirror this ref to Artifacts instead of running checks. */
+  mirrorRef?: string;
 }
 
 /** Verify X-Hub-Signature-256 against the raw body — HMAC-SHA256 hex. */
@@ -59,7 +67,9 @@ export function parseCheckEvent(
 
   if (event === "pull_request") {
     const action = str(payload.action);
-    if (!["opened", "synchronize", "reopened", "ready_for_review"].includes(action ?? ""))
+    // `edited` re-fires the PR-body escape hatch ("No tests:") — the old GHA
+    // ran the coverage gate on body edits for exactly this reason.
+    if (!["opened", "synchronize", "reopened", "ready_for_review", "edited"].includes(action ?? ""))
       return null;
     const pr = payload.pull_request;
     if (!isObj(pr) || !isObj(pr.head)) return null;
@@ -70,6 +80,7 @@ export function parseCheckEvent(
       sha,
       prNumber: typeof pr.number === "number" ? pr.number : undefined,
       headRef: str(pr.head.ref),
+      ...(action === "edited" ? { edited: true } : {}),
     };
   }
 
@@ -79,15 +90,16 @@ export function parseCheckEvent(
     if (!isObj(mg)) return null;
     const sha = str(mg.head_sha);
     if (!sha) return null;
-    // head_ref looks like "gh-readonly-queue/main/pr-42-<sha>" — the pr-N
-    // segment recovers the PR number for checks needing the PR body.
+    // head_ref looks like "refs/heads/gh-readonly-queue/main/pr-42-<sha>" —
+    // the pr-N segment recovers the PR number for checks needing the PR body.
     const headRef = str(mg.head_ref);
     const prMatch = headRef?.match(/pr-(\d+)-/);
     return {
       repo,
       sha,
       headRef,
-      prNumber: prMatch ? Number(prMatch[1]) : undefined,
+      baseSha: str(mg.base_sha),
+      ...(prMatch ? { prNumber: Number(prMatch[1]) } : {}),
     };
   }
 
@@ -98,7 +110,60 @@ export function parseCheckEvent(
     if (!isObj(suite)) return null;
     const sha = str(suite.head_sha);
     if (!sha) return null;
-    return { repo, sha, headRef: str(suite.head_branch) };
+    const headBranch = str(suite.head_branch);
+    // A suite requested on a merge-queue branch names the PR in the ref —
+    // recover it so PR-body checks keep their escape hatch on that path too.
+    const prMatch = headBranch?.includes("gh-readonly-queue/")
+      ? headBranch.match(/pr-(\d+)-/)
+      : undefined;
+    return {
+      repo,
+      sha,
+      headRef: headBranch,
+      ...(prMatch ? { prNumber: Number(prMatch[1]) } : {}),
+    };
+  }
+
+  // Per-check "Re-run" in the GitHub UI — fires check_run.rerequested, NOT
+  // check_suite.rerequested. Without this the button silently does nothing.
+  if (event === "check_run") {
+    if (str(payload.action) !== "rerequested") return null;
+    const run = payload.check_run;
+    if (!isObj(run)) return null;
+    const sha = str(run.head_sha);
+    const name = str(run.name);
+    if (!sha || !name) return null;
+    const suite = isObj(run.check_suite) ? run.check_suite : undefined;
+    const headBranch = suite ? str(suite.head_branch) : undefined;
+    const prMatch = headBranch?.includes("gh-readonly-queue/")
+      ? headBranch.match(/pr-(\d+)-/)
+      : undefined;
+    return {
+      repo,
+      sha,
+      headRef: headBranch,
+      checkNames: [name],
+      ...(prMatch ? { prNumber: Number(prMatch[1]) } : {}),
+    };
+  }
+
+  // push → mirror the branch to Artifacts. This replaces the artifacts-sync
+  // GHA job: same ignore list, same force-push contract, so
+  // cf.artifacts.repo.pushed fires downstream exactly as before.
+  if (event === "push") {
+    const ref = str(payload.ref);
+    const sha = str(payload.after);
+    if (!ref?.startsWith("refs/heads/") || !sha) return null;
+    const branch = ref.slice("refs/heads/".length);
+    // Ignore list carried over verbatim from artifacts-sync.yml.
+    if (
+      branch.startsWith("gh-readonly-queue/") ||
+      branch.startsWith("issue-") ||
+      branch.startsWith("dependabot/")
+    ) {
+      return null;
+    }
+    return { repo, sha, mirrorRef: branch };
   }
 
   return null;

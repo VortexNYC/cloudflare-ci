@@ -215,22 +215,56 @@ export function buildCheckoutScript(payload: {
   sha: string;
   headRef?: string;
   prNumber?: number;
+  baseSha?: string;
 }): string {
-  // PR heads fetch via the stable pull/N/head ref — a raw sha becomes
-  // unreachable after a force-push and GitHub refuses the sha-in-want.
-  // merge_queue/check_suite events keep sha fetch (always reachable).
-  const fetchRef = payload.prNumber
-    ? `pull/${payload.prNumber}/head`
-    : payload.headRef ?? payload.sha;
-  return [
+  // Diff-based checks (diff-coverage) measure against refs/ci/base, pinned
+  // here to the true diff base: the merge's base parent for merge commits,
+  // merge_group.base_sha for queue groups (a chain of merges makes HEAD^1
+  // point at the previous PR's merge, not the base tip).
+  const pinBase = (expr: string) =>
+    `[ "$rc" = 0 ] && { git update-ref refs/ci/base ${expr} 2>/dev/null || ` +
+    "git update-ref refs/ci/base HEAD^1 2>/dev/null || true; }";
+  const lines = [
     "set +e",
     "mkdir -p /workspace && cd /workspace",
     "git init -q .",
     `git remote add origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git 2>/dev/null || ` +
       `git remote set-url origin https://x-access-token:\$GITHUB_TOKEN@github.com/${payload.repo}.git`,
-    `git fetch -q --depth 50 origin ${fetchRef} && git checkout -q ${payload.sha}`,
-    "echo ===CI:CHECKOUT:RC=$?===",
-  ].join("\n");
+    "rc=0",
+  ];
+  if (payload.headRef?.includes("gh-readonly-queue/")) {
+    // Merge-queue SHAs are synthetic merges on the queue branch — unreachable
+    // from pull/N/head, so the queue ref itself must be fetched.
+    lines.push(
+      `git fetch -q --depth 50 origin ${shellQuote(payload.headRef)} && git checkout -q ${payload.sha} || rc=$?`,
+      pinBase(payload.baseSha ?? "HEAD^1")
+    );
+  } else if (payload.prNumber) {
+    // Prefer the PR merge ref (what GHA checked out): its first parent is the
+    // base tip, so ci/base covers the whole PR instead of just the tip commit.
+    // GitHub rebuilds the merge ref lazily — a stale one (second parent ≠ this
+    // head sha) or a missing one (conflicts) falls back to the head fetch,
+    // where ci/base degrades to the tip's parent.
+    lines.push(
+      `if git fetch -q --depth 50 origin pull/${payload.prNumber}/merge 2>/dev/null && ` +
+        `[ "$(git rev-parse 'FETCH_HEAD^2' 2>/dev/null)" = "${payload.sha}" ]; then`,
+      `  echo "checkout: pull/${payload.prNumber}/merge"`,
+      `  git checkout -q FETCH_HEAD || rc=$?`,
+      `else`,
+      `  echo "checkout: pull/${payload.prNumber}/head (merge ref stale or absent)"`,
+      `  git fetch -q --depth 50 origin pull/${payload.prNumber}/head && git checkout -q ${payload.sha} || rc=$?`,
+      `fi`,
+      pinBase("HEAD^1")
+    );
+  } else {
+    const fetchRef = payload.headRef ?? payload.sha;
+    lines.push(
+      `git fetch -q --depth 50 origin ${shellQuote(fetchRef)} && git checkout -q ${payload.sha} || rc=$?`,
+      pinBase("HEAD^1")
+    );
+  }
+  lines.push("echo ===CI:CHECKOUT:RC=$rc===");
+  return lines.join("\n");
 }
 
 export function buildRunScript(
