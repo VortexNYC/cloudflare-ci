@@ -300,6 +300,14 @@ type CheckEntry = NonNullable<
 
 const baselineChecks: CheckEntry[] = [
   {
+    // VTX-593: prc joins the baseline — runs where the repo ships the
+    // script (vortex), skips cleanly elsewhere. The gate propagates.
+    name: "prc",
+    command:
+      '[ -f production-readiness/prc.sh ] && bash production-readiness/prc.sh || echo "prc: no script — skipped"',
+    timeoutMs: 15 * 60 * 1000,
+  },
+  {
     name: "gitleaks",
     command:
       'CFG=""; [ -f .gitleaks.toml ] && CFG="--config .gitleaks.toml"; ' +
