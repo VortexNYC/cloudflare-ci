@@ -272,11 +272,21 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     }
 
     // Same shape as preview: build's snapshot already carries dist/, so
-    // deploy is install + wrangler deploy only.
+    // deploy is install + wrangler deploy only. With a rollout configured
+    // (VTX-582) the worker ships via versions upload + staged promote —
+    // traffic percentages in order — and deployCommand covers only the
+    // non-versioned extras.
     const deployCommand =
       `${npmrcCommand} && ` +
       `${relinkCommand} && ` +
-      `${config.deployCommand}`;
+      (config.rolloutUploadCommand && config.rolloutPromoteCommand
+        ? `VID_OUT=$(${config.rolloutUploadCommand} 2>&1) && echo "$VID_OUT" && ` +
+          `VID=$(echo "$VID_OUT" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1) && ` +
+          `[ -n "$VID" ] && ` +
+          `for PCT in ${(config.rolloutSteps ?? [10, 50, 100]).join(" ")}; do ` +
+          `${config.rolloutPromoteCommand} && sleep ${config.rolloutSettleSec}; done && ` +
+          `${config.deployCommand}`
+        : `${config.deployCommand}`);
 
     await buildResult.runner({
       name: "deploy",
