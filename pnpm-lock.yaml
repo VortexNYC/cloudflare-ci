@@ -21,6 +21,9 @@ importers:
       '@cloudflare/sandbox':
         specifier: 0.12.10
         version: 0.12.10(patch_hash=b1baf5586893ececdf3e9514348e7d4605e4ec08e2d5b2f050a1dd6f13ffd348)
+      sandbox-1:
+        specifier: npm:@cloudflare/sandbox@1.0.1
+        version: '@cloudflare/sandbox@1.0.1'
       zod:
         specifier: ^3.25.0
         version: 3.25.76
@@ -60,6 +63,9 @@ packages:
         optional: true
       '@xterm/xterm':
         optional: true
+
+  '@cloudflare/sandbox@1.0.1':
+    resolution: {integrity: sha512-8Qvv2SbMGfDW+zo0AkwaDna+b+IbXPgMKjelu6UZla1jyTwt1Ye0Z4LEahwoXtIMbpQvopr9NvXtLm+abA7+Tw==}
 
   '@cloudflare/unenv-preset@2.16.1':
     resolution: {integrity: sha512-ECxObrMfyTl5bhQf/lZCXwo5G6xX9IAUo+nDMKK4SZ8m4Jvvxp52vilxyySSWh2YTZz8+HQ07qGH/2rEom1vDw==}
@@ -598,6 +604,11 @@ snapshots:
       aws4fetch: 1.0.20
       capnweb: 0.8.0
       hono: 4.13.7
+
+  '@cloudflare/sandbox@1.0.1':
+    dependencies:
+      aws4fetch: 1.0.20
+      zod: 4.6.5
 
   '@cloudflare/unenv-preset@2.16.1(unenv@2.0.0-rc.24)(workerd@1.20260915.1)':
     dependencies:

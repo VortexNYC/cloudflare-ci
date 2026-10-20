@@ -13,6 +13,7 @@
   "dependencies": {
     "@cloudflare/ci": "0.2.0",
     "@cloudflare/sandbox": "0.12.10",
+    "sandbox-1": "npm:@cloudflare/sandbox@1.0.1",
     "zod": "^3.25.0"
   },
   "devDependencies": {

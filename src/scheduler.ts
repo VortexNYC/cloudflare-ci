@@ -3,14 +3,17 @@ import { getSandbox } from "@cloudflare/sandbox";
 import type { CiParams, CloudflareArtifacts } from "@cloudflare/ci";
 import type { Bindings } from "./env";
 
-export type PoolName = "SANDBOX" | "SANDBOX_LITE" | "EXTERNAL";
+export type PoolName = "SANDBOX" | "SANDBOX_LITE" | "CHECKS" | "EXTERNAL";
 
-// Per-app container caps — must match max_instances in wrangler.jsonc.
+// Per-app container caps — must match max_instances in wrangler.jsonc for
+// the 0.x pools. CHECKS runs on durable_object scheduling (no app cap), so
+// its ledger entry is the only bound on checks-container spend.
 // EXTERNAL is the shared ledger for demand outside this worker (Pile lane
 // sandboxes): they admit here too so one DO sees total container pressure.
 const POOL_LIMITS: Record<PoolName, number> = {
   SANDBOX: 10,
   SANDBOX_LITE: 10,
+  CHECKS: 10,
   EXTERNAL: 16,
 };
 
@@ -104,6 +107,18 @@ export class CiScheduler extends DurableObject<Bindings> {
     return reaped;
   }
 
+  // CHECKS reservations live on the 1.0 DO pool — destroy is a method on the
+  // stub, not getSandbox(). The 0.x pools go through getSandbox as before.
+  private destroyPooled(r: Reservation): Promise<void> {
+    if (r.pool === "CHECKS") {
+      return this.env.CHECKS_SANDBOX.getByName(r.name).destroy();
+    }
+    return getSandbox(
+      this.env[r.pool as "SANDBOX" | "SANDBOX_LITE"],
+      r.name
+    ).destroy();
+  }
+
   /**
    * Destroys one stale sandbox within the reap bound. Returns false only on
    * timeout — the container may still be alive, so the reservation stays on
@@ -115,9 +130,7 @@ export class CiScheduler extends DurableObject<Bindings> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        getSandbox(this.env[r.pool as "SANDBOX" | "SANDBOX_LITE"], r.name)
-          .destroy()
-          .then(() => true as const),
+        this.destroyPooled(r).then(() => true as const),
         new Promise<false>((resolve) => {
           timer = setTimeout(
             () => resolve(false),
@@ -285,7 +298,7 @@ export class CiScheduler extends DurableObject<Bindings> {
       const status = await this.instanceStatus(r.instanceId);
       if (!status || status === "running" || status === "queued" || status === "paused") continue;
       try {
-        await getSandbox(this.env[r.pool as 'SANDBOX' | 'SANDBOX_LITE'], r.name).destroy();
+        await this.destroyPooled(r);
       } catch {
         // already gone — the reservation is the only thing left to drop
       }
@@ -319,10 +332,7 @@ export class CiScheduler extends DurableObject<Bindings> {
       for (const r of await this.reservations()) {
         if (r.instanceId !== claim.instanceId) continue;
         try {
-          await getSandbox(
-            this.env[r.pool as "SANDBOX" | "SANDBOX_LITE"],
-            r.name
-          ).destroy();
+          await this.destroyPooled(r);
         } catch {
           // already gone
         }
