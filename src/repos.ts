@@ -175,7 +175,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     rollbackCommand: "pnpm exec wrangler rollback -e production",
     rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     rolloutPromoteCommand:
-      'pnpm exec wrangler versions deploy "$VID@$PCT%" -e production',
+      'pnpm exec wrangler versions deploy "$VID@$PCT%" -e production -y',
     rolloutSteps: [10, 50, 100],
     rolloutSettleSec: 90,
     // Staging bake: previewCommand already ships -e staging; this probes it
@@ -303,8 +303,10 @@ const baselineChecks: CheckEntry[] = [
     // VTX-593: prc joins the baseline — runs where the repo ships the
     // script (vortex), skips cleanly elsewhere. The gate propagates.
     name: "prc",
+    // Skip only when the repo lacks the script; a real gate failure must
+    // still fail the check (Codex: `|| echo` was swallowing it).
     command:
-      '[ -f production-readiness/prc.sh ] && bash production-readiness/prc.sh || echo "prc: no script — skipped"',
+      '[ -f production-readiness/prc.sh ] || { echo "prc: no script — skipped"; exit 0; }; bash production-readiness/prc.sh',
     timeoutMs: 15 * 60 * 1000,
   },
   {

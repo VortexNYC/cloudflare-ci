@@ -323,31 +323,17 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       `${relinkCommand} && ` +
       (config.rolloutUploadCommand && config.rolloutPromoteCommand
         ? `VID_OUT=$(${config.rolloutUploadCommand} 2>&1) && echo "$VID_OUT" && ` +
-          `VID=$(echo "$VID_OUT" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1) && ` +
+          `VID=$(echo "$VID_OUT" | grep -oE 'Worker Version ID: [0-9a-f-]+' | head -1 | sed 's/.*: //') && ` +
           `[ -n "$VID" ] && ` +
           `for PCT in ${(config.rolloutSteps ?? [10, 50, 100]).join(" ")}; do ` +
           `${config.rolloutPromoteCommand} && sleep ${config.rolloutSettleSec}; done && ` +
           `${config.deployCommand}`
         : `${config.deployCommand}`);
 
-    await buildResult.runner({
-      name: "deploy",
-      command: bound(deployCommand, DEPLOY_COMMAND_TIMEOUT_MS),
-      secrets: ["NPM_TOKEN", ...config.deploySecrets],
-      persist: false,
-      cloudflareCredentials: {
-        accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
-      },
-      env: baseEnv,
-      config: {
-        timeout: DEPLOY_STEP_TIMEOUT_MS,
-        commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
-      },
-    });
-
-    // VTX-583: a failed gate (verify, or the post-rollout watch below) runs
-    // rollbackCommand instead of leaving the bad deploy serving. A failed
-    // rollback is logged but never masks the gate failure that caused it.
+    // VTX-583: a failed gate (deploy promote, verify, or the post-rollout
+    // watch below) runs rollbackCommand instead of leaving the bad deploy
+    // serving. A failed rollback is logged but never masks the gate
+    // failure that caused it.
     const rollback = async (gate: string): Promise<void> => {
       if (!config.rollbackCommand) return;
       console.error(`[cloudflare-ci] ${gate} failed for ${String(repo)} — rolling back`);
@@ -371,6 +357,28 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           console.error("[cloudflare-ci] rollback failed", rollbackError);
         });
     };
+
+    // Codex: a mid-rollout promote failure would leave the traffic split
+    // live — deploy failures roll back the same way verify/watch do.
+    try {
+      await buildResult.runner({
+        name: "deploy",
+        command: bound(deployCommand, DEPLOY_COMMAND_TIMEOUT_MS),
+        secrets: ["NPM_TOKEN", ...config.deploySecrets],
+        persist: false,
+        cloudflareCredentials: {
+          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+        },
+        env: baseEnv,
+        config: {
+          timeout: DEPLOY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+        },
+      });
+    } catch (deployError) {
+      await rollback("deploy");
+      throw deployError;
+    }
 
     // Post-deploy proof, same lite-pool shape as migrate: self-contained
     // command, no workspace restore. A non-zero exit fails the run — a
