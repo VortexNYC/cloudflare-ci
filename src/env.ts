@@ -24,6 +24,11 @@ export type Bindings = CiBindings & {
   // TTL'd — a stored push token expires silently).
   ARTIFACTS_ACCOUNT_ID?: string;
   ARTIFACTS_API_TOKEN?: string;
+  /** Long-TTL repo-scoped push token — used directly when set; otherwise the
+   *  mirror mints a 15-min token per push via ARTIFACTS_API_TOKEN. */
+  ARTIFACTS_PUSH_TOKEN?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CF_TOKEN?: string;
   CLOUDFLARE_API_TOKEN?: string;
   // GitHub-side auth for the checks path. CHECKS_GITHUB_TOKEN mints
   // check-runs + reads PRs; GITHUB_WEBHOOK_SECRET verifies inbound
