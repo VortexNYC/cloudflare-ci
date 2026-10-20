@@ -28,13 +28,10 @@ const CHECKOUT_TIMEOUT_SEC = 15 * 60;
 // for a run that dies without its finally.
 const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
 
-// container.exec's argv[0] must be a STATIC binary on this platform —
-// execve surfaces a missing dynamic interpreter as "Command `x` was not
-// found in the container" (that's why only /usr/local/bin/sandbox-shim,
-// a static ELF, ever resolves). busybox-static gives us a static entrypoint
-// that execs the real dynamically-linked tools in the container's normal
-// environment, where PATH and the loader work as usual.
-const BUSYBOX = "/usr/bin/busybox";
+// container.exec({cwd}) fails to spawn when the dir doesn't exist — the
+// platform reports it as "Command `x` was not found in the container", which
+// reads like an argv[0] lookup failure but is actually the chdir. The shim's
+// own calls never pass cwd; ours do — /workspace must exist in the image.
 
 // exec() processes do not see Dockerfile ENV on 1.0 — PATH/HOME ship on every
 // exec call. PATH covers the go toolchain and the npm-globals layer.
@@ -130,10 +127,9 @@ export class ChecksSandbox extends DurableObject<Bindings> {
   ): Promise<ChecksRunResult> {
     await this.files.writeFile(path, script);
     // GNU timeout kills the process group — an AbortSignal would orphan the
-    // script's children. Exit code 124 means the bound was hit. argv[0] is
-    // static busybox; the real timeout+bash run inside the container.
+    // script's children. Exit code 124 means the bound was hit.
     const process = await this.container.exec(
-      [BUSYBOX, "sh", "-c", `exec timeout --kill-after=10 ${timeoutSec} bash ${path}`],
+      ["timeout", "--kill-after=10", String(timeoutSec), "bash", path],
       { cwd: "/workspace", env: { ...BASE_ENV, ...env } }
     );
     const output = await process.output();
@@ -150,7 +146,7 @@ export class ChecksSandbox extends DurableObject<Bindings> {
   private async storeKey(repo: string): Promise<string | null> {
     try {
       const process = await this.container.exec(
-        [BUSYBOX, "sh", "-c", "exec sha256sum pnpm-lock.yaml"],
+        ["sha256sum", "pnpm-lock.yaml"],
         { cwd: "/workspace", env: BASE_ENV }
       );
       const output = await process.output();

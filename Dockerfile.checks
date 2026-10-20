@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg \
  && echo "deb http://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update && apt-get install -y --no-install-recommends \
-    git postgresql-16 make default-jre-headless build-essential zstd busybox-static \
+    git postgresql-16 make default-jre-headless build-essential zstd \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL "https://go.dev/dl/go1.27.2.linux-$(dpkg --print-architecture).tar.gz" \
     -o /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
@@ -28,9 +28,10 @@ RUN ARCH="$(dpkg --print-architecture)" && curl -fsSL \
 # must match the installed sandbox-1 package version.
 COPY --from=docker.io/cloudflare/sandbox:1.0.1 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 
-# container.exec's argv[0] must be a STATIC binary — the platform's execve
-# path can't load dynamic ELF interpreters (that's why only the static
-# sandbox-shim ever resolved). busybox-static is our static entrypoint;
-# it execs the real tools inside the container's normal environment.
+# container.exec({cwd}) fails to spawn when the dir doesn't exist — the
+# platform reports it as "Command `x` was not found in the container",
+# which reads like an argv[0] lookup failure but is actually the chdir.
+# /workspace is our exec cwd; the checkout script's own mkdir was too late.
+RUN mkdir -p /workspace
 
 CMD ["sleep", "infinity"]
