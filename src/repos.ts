@@ -167,14 +167,8 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
         timeoutMs: 10 * 60 * 1000,
         usesPrBody: true,
       },
-      {
-        name: "gitleaks",
-        // Replaces gitleaks.yml — same config file, same range semantics.
-        // refs/ci/base is pinned at checkout to the true diff base.
-        command:
-          'gitleaks git --config .gitleaks.toml --redact --log-opts "refs/ci/base..HEAD" --verbose .',
-        timeoutMs: 5 * 60 * 1000,
-      },
+      // gitleaks rides the platform baseline — .gitleaks.toml is
+      // auto-detected by the baseline command.
     ],
   },
 
@@ -246,11 +240,32 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
 
 const repoNameSchema = z.enum(["seal", "pile", "veil", "vortex"]);
 
+// Platform baseline (VTX-580): gates every repo inherits regardless of its
+// own `checks` — merged by name so a repo entry overrides the baseline, and
+// the merged list is the single source for required contexts (VTX-581).
+// gitleaks scans every repo's diff with the repo's .gitleaks.toml when it
+// exists, defaults otherwise — one check name, one binary, every repo.
+const baselineChecks: z.input<typeof repoConfigSchema>["checks"] = [
+  {
+    name: "gitleaks",
+    command:
+      'CFG=""; [ -f .gitleaks.toml ] && CFG="--config .gitleaks.toml"; ' +
+      'gitleaks git $CFG --redact --log-opts "refs/ci/base..HEAD" --verbose .',
+    timeoutMs: 5 * 60 * 1000,
+  },
+];
+
 export function getRepoConfig(repoName: unknown): RepoConfig | undefined {
   const parsed = repoNameSchema.safeParse(repoName);
   if (!parsed.success) {
     return undefined;
   }
   const config = repoConfigs[parsed.data];
-  return config ? repoConfigSchema.parse(config) : undefined;
+  if (!config) return undefined;
+  const merged = { ...config };
+  const byName = new Map<string, (typeof baselineChecks)[number]>();
+  for (const check of baselineChecks) byName.set(check.name, check);
+  for (const check of merged.checks ?? []) byName.set(check.name, check);
+  merged.checks = [...byName.values()];
+  return repoConfigSchema.parse(merged);
 }
