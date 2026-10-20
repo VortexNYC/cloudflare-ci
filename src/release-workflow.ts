@@ -53,14 +53,16 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
         // Tokens ride the container env — never argv (process listings).
         const clone = [
           "set -euo pipefail",
-          "git init -q /workspace/repo && cd /workspace/repo",
-          'git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
+          "git init -q /workspace && cd /workspace",
+          // Retry re-runs the checkout — remote add must not fail on retry.
+          '(git remote get-url origin >/dev/null 2>&1 || ' +
+            'git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git")',
           'git fetch -q origin "$SHA"',
           "git checkout -q FETCH_HEAD",
         ].join(" && ");
         const result = await sandbox.runCheck({
           checkoutScript: clone,
-          script: config.releaseCommand,
+          script: `cd /workspace && ${config.releaseCommand}`,
           env: {
             GITHUB_TOKEN: this.env.CHECKS_GITHUB_TOKEN ?? "",
             NPM_TOKEN: this.env.NPM_TOKEN ?? "",
