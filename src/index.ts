@@ -314,7 +314,11 @@ async function handleGitHubWebhook(
   // artifacts-sync.yml. The cf.artifacts.repo.pushed event carries the
   // pipeline downstream exactly as the GHA job did.
   if (target.mirrorRef) {
-    const id = `mirror-${target.repo.replace("/", "-")}-${target.mirrorRef}-${target.sha.slice(0, 10)}`;
+    // Workflow ids reject slashes — branches like feature/x must sanitize.
+    const id =
+      `mirror-${target.repo}-${target.mirrorRef}-${target.sha.slice(0, 10)}`
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, "-");
     await env.MIRROR_WORKFLOW.create({
       id,
       params: { repo: target.repo, branch: target.mirrorRef, sha: target.sha },
