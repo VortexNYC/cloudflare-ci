@@ -202,7 +202,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       'for F in dist/pile-*; do CODE=$(curl -s -o /tmp/up.json -w "%{http_code}" -X PUT ' +
       '-H "Authorization: Bearer $ADMIN_TOKEN" --data-binary "@$F" ' +
       '"https://cloudflare-ci.vortex-nyc.workers.dev/admin/release-asset/$TAG/$(basename $F)") && ' +
-      'echo "$(basename $F): $CODE" && [ "$CODE" = "200" ] || { cat /tmp/up.json; exit 1; }; done && ' +
+      'echo "$(basename $F): $CODE" >&2 && [ "$CODE" = "200" ] || { cat /tmp/up.json >&2; exit 1; }; done && ' +
       'echo "assets pushed to worker"',
 rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     rolloutPromoteCommand:
