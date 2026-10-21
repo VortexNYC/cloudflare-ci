@@ -407,10 +407,12 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           `if [ $P_RC -ne 0 ]; then ` +
           `if echo "$P_OUT" | grep -q "identical Durable Object-managed"; then ` +
           // A version that changes container declarations can't share a
-          // multi-version split — jump straight to 100% instead of rolling
-          // back a deploy that was never wrong.
-          `PCT=100 PROMOTE || { ROLLBACK; exit 1; }; break; ` +
+          // multi-version split — jump straight to 100%. If even that fails
+          // and no promote ever took traffic, exit plain: a rollback here
+          // would flip prod to an older version for nothing.
+          `PCT=100 PROMOTE || { [ -n "$PROMOTED" ] && ROLLBACK; exit 1; }; break; ` +
           `else ROLLBACK; exit 1; fi; fi; ` +
+          `PROMOTED=1; ` +
           `sleep ${config.rolloutSettleSec}; done; fi && ` +
           `${config.deployCommand} || { ROLLBACK; exit 1; }`
         : `${config.deployCommand}`);
