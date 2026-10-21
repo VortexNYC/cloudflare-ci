@@ -228,6 +228,12 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     // bindings but has no queue consumer, no cron, no EMAIL — last branch
     // pushed wins. Pinned container digests mean no Docker needed.
     previewCommand: "pnpm exec wrangler deploy -e staging",
+  },
+  canary: {
+    name: "canary",
+    installEnv: { HOME: "/tmp", CI: "true", VP_GIT_HOOKS: "0" },
+    buildCommand: "echo canary",
+    previewCommand: "pnpm exec wrangler deploy --name cloudflare-ci-canary && curl -fsS --max-time 15 https://cloudflare-ci-canary.vortex-nyc.workers.dev/health",
     verifyCommand: 'curl -fsS --max-time 15 https://pile.nyc/health',
     d1Database: "pile-global",
     d1MigrationsCwd: ".",
@@ -394,7 +400,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
   },
 };
 
-const repoNameSchema = z.enum(["seal", "pile", "veil", "vortex"]);
+const repoNameSchema = z.enum(["seal", "pile", "veil", "vortex", "canary"]);
 
 // Platform baseline (VTX-580): gates every repo inherits regardless of its
 // own `checks` — merged by name so a repo entry overrides the baseline, and

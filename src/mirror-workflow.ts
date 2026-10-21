@@ -16,7 +16,7 @@ type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
 
 const ARTIFACTS_NS = "vortex";
 
-async function resolveArtifactsToken(
+export async function resolveArtifactsToken(
   env: Bindings,
   repo: string
 ): Promise<string> {

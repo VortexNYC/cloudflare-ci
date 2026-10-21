@@ -435,16 +435,20 @@ export default {
     }
     return new Response("cloudflare-ci", { status: 200 });
   },
-  async scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+  async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
     ctx.waitUntil(
-      scheduler(env).sweep().then((results) => {
-        if (results.reaped.length > 0) {
-          console.log("sandbox sweep", results);
+      (async () => {
+        if (event.cron === "*/30 * * * *") {
+          await env.CANARY_WORKFLOW.create({ id: `canary-${Date.now()}`, params: {} });
+          return;
         }
-      })
+        const results = await scheduler(env).sweep();
+        if (results.reaped.length > 0) console.log("sandbox sweep", results);
+      })()
     );
   },
 };
 
 export { CiScheduler } from "./scheduler";
 export { ChecksWorkflow } from "./checks-workflow";
+export { CanaryWorkflow } from "./canary-workflow";

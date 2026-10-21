@@ -77,9 +77,14 @@
         ]
       }
     ],
-    "crons": ["*/15 * * * *"]
+    "crons": ["*/15 * * * *", "*/30 * * * *"]
   },
   "workflows": [
+    {
+      "name": "cloudflare-ci-canary",
+      "binding": "CANARY_WORKFLOW",
+      "class_name": "CanaryWorkflow"
+    },
     {
       "name": "cloudflare-ci",
       "binding": "CI_WORKFLOW",
