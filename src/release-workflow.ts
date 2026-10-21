@@ -115,7 +115,12 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
         for (const asset of assets) {
           const obj = await this.env.BACKUP_BUCKET.get(asset.key);
           if (!obj) continue;
-          const name = asset.key.split("/").pop()!;
+          const name = asset.key.split("/").pop()!.replace(/\.gz$/, "");
+          // Binaries arrive gzipped — the sandbox's egress body cap killed
+          // raw ~100MB PUTs. Decompress here before the GitHub upload.
+          const raw = await new Response(
+            obj.body.pipeThrough(new DecompressionStream("gzip"))
+          ).arrayBuffer();
           const up = await fetch(
             `https://uploads.github.com/repos/${repo}/releases/${id}/assets?name=${name}`,
             {
@@ -124,7 +129,7 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
                 ...ghHeaders,
                 "Content-Type": "application/octet-stream",
               },
-              body: obj.body,
+              body: raw,
             }
           );
           if (!up.ok) {

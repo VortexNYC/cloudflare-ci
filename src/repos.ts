@@ -199,7 +199,8 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "pnpm add -D @opentui/core-darwin-arm64 @opentui/core-darwin-x64 >> /tmp/install.log 2>&1 && " +
       'for T in linux-x64 darwin-arm64 darwin-x64; do pnpm dlx bun build --compile --minify --target=bun-$T src/index.ts --outfile "dist/pile-$T" >> /tmp/build.log 2>&1 || exit 1; done && ' +
       'ls -la dist/ && ' +
-      'for F in dist/pile-*; do CODE=$(curl -s -o /tmp/up.json -w "%{http_code}" -X PUT ' +
+      'for F in dist/pile-*; do gzip -9 -k "$F"; done && ' +
+      'for F in dist/pile-*.gz; do CODE=$(curl -s -o /tmp/up.json -w "%{http_code}" -X PUT ' +
       '-H "Authorization: Bearer $ADMIN_TOKEN" --data-binary "@$F" ' +
       '"https://cloudflare-ci.vortex-nyc.workers.dev/admin/release-asset/$TAG/$(basename $F)") && ' +
       'echo "$(basename $F): $CODE" >&2 && [ "$CODE" = "200" ] || { cat /tmp/up.json >&2; exit 1; }; done && ' +
