@@ -46,25 +46,21 @@ export class CanaryWorkflow extends WorkflowEntrypoint<
 
       await step.do("bump-and-push", async () => {
         const sandbox = this.env.CHECKS_SANDBOX.getByName(sandboxId);
-        const seed = [
-          "mkdir -p /work/src",
-          'cat > /work/package.json <<\'EOF\'\n{"name":"canary","private":true,"version":"0.0.0"}\nEOF',
-          "printf 'lockfileVersion: \"9.0\"\\n' > /work/pnpm-lock.yaml",
-          'printf \'name = "cloudflare-ci-canary"\\nmain = "src/index.js"\\ncompatibility_date = "2026-07-30"\\n\' > /work/wrangler.toml',
-          'cat > /work/src/index.js <<\'EOF\'\nexport default { async fetch(r) { return new URL(r.url).pathname === "/health" ? Response.json({ok:true,canary:true}) : new Response("canary"); } };\nEOF',
-        ].join(" && ");
         const result = await sandbox.runCheck({
           checkoutScript: [
             "set -euo pipefail",
-            "mkdir -p /workspace /work && cd /workspace",
+            "mkdir -p /workspace && cd /workspace",
             `git clone --depth 1 --branch canary "$REMOTE" . 2>/dev/null || ` +
               "(git init -q && git checkout -q -b canary)",
             "git config user.email ci@cloudflare-ci.internal && git config user.name cloudflare-ci",
-            "cd /work && " + seed,
-            "cp -a /work/. /workspace/",
           ].join(" && "),
           script: [
             "cd /workspace",
+            "mkdir -p src",
+            'cat > package.json <<\'EOF\'\n{"name":"canary","private":true,"version":"0.0.0"}\nEOF',
+            "printf 'lockfileVersion: \"9.0\"\\n' > pnpm-lock.yaml",
+            'printf \'name = "cloudflare-ci-canary"\\nmain = "src/index.js"\\ncompatibility_date = "2026-07-30"\\n\' > wrangler.toml',
+            'cat > src/index.js <<\'EOF\'\nexport default { async fetch(r) { return new URL(r.url).pathname === "/health" ? Response.json({ok:true,canary:true}) : new Response("canary"); } };\nEOF',
             'date +%s > TICK',
             'git add -A && git commit -qm "tick $(cat TICK)" --no-verify',
             'git -c http.extraHeader="Authorization: Bearer $ARTIFACTS_TOKEN" push -f "$REMOTE" canary',
