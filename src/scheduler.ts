@@ -199,7 +199,7 @@ export class CiScheduler extends DurableObject<Bindings> {
       existing &&
       sha &&
       existing.sha === sha &&
-      existing.status === "completed"
+      (existing.status === "completed" || existing.status === "errored")
     ) {
       return false;
     }
@@ -394,6 +394,7 @@ export class CiScheduler extends DurableObject<Bindings> {
         await this.ctx.storage.put(key, {
           ...claim,
           instanceId: created.id,
+          status: "running",
           refires: (claim.refires ?? 0) + 1,
           at: Date.now(),
         });
