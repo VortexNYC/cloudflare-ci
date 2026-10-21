@@ -380,12 +380,25 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       `${npmrcCommand} && ` +
       `${relinkCommand} && ` +
       (config.rolloutUploadCommand && config.rolloutPromoteCommand
-        ? `VID_OUT=$(${config.rolloutUploadCommand} 2>&1); VID_RC=$?; echo "$VID_OUT"; [ $VID_RC -eq 0 ] && ` +
-          `VID=$(echo "$VID_OUT" | grep -oE 'Worker Version ID: [0-9a-f-]+' | head -1 | sed 's/.*: //') && ` +
-          `([ -n "$VID" ] || { echo "no Worker Version ID in upload output" >&2; exit 1; }) && ` +
-          `for PCT in ${(config.rolloutSteps ?? [10, 50, 100]).join(" ")}; do ` +
-          `${config.rolloutPromoteCommand} && sleep ${config.rolloutSettleSec}; done && ` +
-          `${config.deployCommand}`
+        ? `VID_OUT=$(${config.rolloutUploadCommand} 2>&1); VID_RC=$?; echo "$VID_OUT"; ` +
+          `if [ $VID_RC -ne 0 ] && echo "$VID_OUT" | grep -q "pending Durable Object migration"; then ` +
+          `MIG_OUT=$(echo ${JSON.stringify(config.rolloutUploadCommand)} | sed 's/versions upload/deploy/' | sh 2>&1); MRC=$?; ` +
+          `echo "$MIG_OUT"; [ $MRC -eq 0 ] || exit 1; ` +
+          `VID=$(echo "$MIG_OUT" | grep -oE 'Current Version ID: [0-9a-f-]+' | head -1 | sed 's/.*: //'); ` +
+          `else ` +
+          `[ $VID_RC -eq 0 ] || exit 1; ` +
+          `VID=$(echo "$VID_OUT" | grep -oE 'Worker Version ID: [0-9a-f-]+' | head -1 | sed 's/.*: //'); ` +
+          `fi; ` +
+          `([ -n "$VID" ] || { echo "no Worker Version ID in deploy output" >&2; exit 1; }) && ` +
+          // Rollback is inline, not a workflow step: it only exists past the
+          // VID guard, so a failure before any version took traffic can never
+          // roll prod back for nothing.
+          (config.rollbackCommand
+            ? `ROLLBACK(){ ${config.rollbackCommand}; }; `
+            : `ROLLBACK(){ :; }; `) +
+          `if [ -z "$MIG_OUT" ]; then for PCT in ${(config.rolloutSteps ?? [10, 50, 100]).join(" ")}; do ` +
+          `${config.rolloutPromoteCommand} && sleep ${config.rolloutSettleSec} || { ROLLBACK; exit 1; }; done; fi && ` +
+          `${config.deployCommand} || { ROLLBACK; exit 1; }`
         : `${config.deployCommand}`);
 
     // VTX-583: a failed gate (deploy promote, verify, or the post-rollout
@@ -434,7 +447,9 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         },
       });
     } catch (deployError) {
-      await rollback("deploy");
+      // Rollback is inline in the deploy command — it only exists past the
+      // VID guard, so a failure before any version took traffic can never
+      // roll prod back for nothing.
       throw deployError;
     }
 
