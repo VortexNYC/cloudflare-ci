@@ -196,13 +196,18 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "cd packages/cli && pnpm install --frozen-lockfile > /tmp/install.log 2>&1 && " +
       "pnpm add -D @opentui/core-darwin-arm64 @opentui/core-darwin-x64 >> /tmp/install.log 2>&1 && " +
       'for T in linux-x64 darwin-arm64 darwin-x64; do pnpm dlx bun build --compile --minify --target=bun-$T src/index.ts --outfile "dist/pile-$T" >> /tmp/build.log 2>&1 || exit 1; done && ' +
-      'RID=$(curl -sf -X POST -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/releases" ' +
-      '-d "{\"tag_name\":\"$TAG\",\"generate_release_notes\":true}" | tee /tmp/rel.json | grep -oE "id\\":[0-9]+" | head -1 | cut -d: -f2) && ' +
-      'echo "RID=$RID" && ls -la dist/ && ' +
-      'for F in dist/pile-*; do curl -sf -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
+      // The image's curl does not reliably exit non-zero on HTTP errors
+      // under -sf — check status codes explicitly and print bodies.
+      'CODE=$(curl -s -o /tmp/rel.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
+      '"https://api.github.com/repos/$REPO/releases" -d "{\"tag_name\":\"$TAG\",\"generate_release_notes\":true}") && ' +
+      'echo "create: $CODE" && [ "$CODE" = "201" ] || { cat /tmp/rel.json; exit 1; } && ' +
+      'RID=$(grep -oE "id\\":[0-9]+" /tmp/rel.json | head -1 | cut -d: -f2) && echo "RID=$RID" && ' +
+      'for F in dist/pile-*; do ' +
+      'CODE=$(curl -s -o /tmp/up.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
       '-H "Content-Type: application/octet-stream" --data-binary "@$F" ' +
-      '"https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$(basename $F)"; done && ' +
-      'echo "assets uploaded"',
+      '"https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$(basename $F)") && ' +
+      'echo "$(basename $F): $CODE" && [ "$CODE" = "201" ] || { cat /tmp/up.json; exit 1; }; done && ' +
+      'echo "release complete"',
 rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     rolloutPromoteCommand:
       'pnpm exec wrangler versions deploy "$VID@$PCT%" -e production -y',
