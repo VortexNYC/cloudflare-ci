@@ -430,6 +430,9 @@ export default {
     if (pathname === "/admin/sandbox/release" && request.method === "POST") {
       return handleSandboxRelease(request, env);
     }
+    if (pathname.startsWith("/admin/")) {
+      return new Response("Not Found", { status: 404 });
+    }
     return new Response("cloudflare-ci", { status: 200 });
   },
   async scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {

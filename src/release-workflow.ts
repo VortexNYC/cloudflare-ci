@@ -105,6 +105,9 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
         );
         let id: number;
         let uploaded = new Set<string>();
+        if (!existing.ok && existing.status !== 404) {
+          await existing.arrayBuffer();
+        }
         if (existing.ok) {
           const rel = (await existing.json()) as {
             id: number;
@@ -133,53 +136,30 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
         }
         for (const asset of assets) {
           const obj = await this.env.BACKUP_BUCKET.get(asset.key);
-          if (!obj) continue;
-          const name = asset.key.split("/").pop()!.replace(/\.gz$/, "");
+          if (!obj) throw new Error(`release: ${asset.key} missing`);
+          const name = asset.key.split("/").pop()!;
           if (uploaded.has(name)) continue;
           // R2 rejects streams of unknown length, and a ~100MB
           // arrayBuffer OOMs the isolate. The gzip trailer's last 4 bytes
           // carry the uncompressed size — wrap the decompression in a
           // FixedLengthStream and pipe it straight into the upload.
-          const tailObj = await this.env.BACKUP_BUCKET.get(asset.key, {
-            range: { offset: asset.size - 4 },
-          });
-          if (!tailObj) throw new Error(`release: ${asset.key} missing`);
-          const isize = new DataView(await tailObj.arrayBuffer()).getUint32(
-            0,
-            true
-          );
-          const fixed = new FixedLengthStream(isize);
-          obj.body
-            .pipeThrough(new DecompressionStream("gzip"))
-            .pipeTo(fixed.writable)
-            .catch(() => {});
-          // Decompress INTO R2 first (FixedLengthStream carries the
-          // isize), then stream the plain object out — a decompression
-          // pipeline mid-fetch was OOM-killing the isolate at ~108MB.
-          const rawKey = `releases/${tag}/raw/${name}`;
-          await this.env.BACKUP_BUCKET.put(rawKey, fixed.readable);
-          const raw = await this.env.BACKUP_BUCKET.get(rawKey);
-          if (!raw) throw new Error(`release: ${rawKey} not stored`);
+          // Ship the .gz asset — a ~108MB raw binary as a fetch body
+          // OOMs the isolate (hard ~100MB cap); the gzip (~35MB) streams
+          // fine. Asset keeps the .gz suffix; consumers gunzip.
           const up = await fetch(
-            `https://uploads.github.com/repos/${repo}/releases/${id}/assets?name=${name}`,
+            `https://uploads.github.com/repos/${repo}/releases/${id}/assets?name=${name}.gz`,
             {
               method: "POST",
               headers: {
                 ...ghHeaders,
-                "Content-Type": "application/octet-stream",
-                "Content-Length": String(raw.size),
+                "Content-Type": "application/gzip",
+                "Content-Length": String(asset.size),
               },
-              body: raw.body,
+              body: obj.body,
               // @ts-expect-error Workers fetch supports duplex for streams
               duplex: "half",
             }
           );
-          if (!up.ok) {
-            throw new Error(
-              `asset ${name} upload ${up.status}: ${await up.text()}`
-            );
-          }
-          await this.env.BACKUP_BUCKET.delete(rawKey);
           await this.env.BACKUP_BUCKET.delete(asset.key);
         }
         return id;
