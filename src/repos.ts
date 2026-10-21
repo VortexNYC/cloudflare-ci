@@ -203,9 +203,9 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       '-H "Content-Type: application/json" "https://api.github.com/repos/$REPO/releases" -d "@/tmp/rel-payload.json") && ' +
       'echo "create: $CODE" >&2 && ' +
       'if [ "$CODE" = "422" ]; then RID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" ' +
-      '"https://api.github.com/repos/$REPO/releases/tags/$TAG" | grep -oE "id\\":[0-9]+" | head -1 | cut -d: -f2); ' +
+      '"https://api.github.com/repos/$REPO/releases/tags/$TAG" | tr -d " \\n\\"" | grep -oE "id:[0-9]+" | head -1 | cut -d: -f2); ' +
       'else [ "$CODE" = "201" ] || { cat /tmp/rel.json >&2; exit 1; } && ' +
-      'RID=$(grep -oE "id\\":[0-9]+" /tmp/rel.json | head -1 | cut -d: -f2); fi && ' +
+      'RID=$(tr -d " \\n\\"" < /tmp/rel.json | grep -oE "id:[0-9]+" | head -1 | cut -d: -f2); fi && ' +
       'echo "RID=$RID" >&2 && [ -n "$RID" ] || { echo "no RID" >&2; exit 1; } && ' +
       'for F in dist/pile-*; do ' +
       'CODE=$(curl -s -o /tmp/up.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
