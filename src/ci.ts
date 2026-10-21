@@ -378,9 +378,9 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       `${npmrcCommand} && ` +
       `${relinkCommand} && ` +
       (config.rolloutUploadCommand && config.rolloutPromoteCommand
-        ? `VID_OUT=$(${config.rolloutUploadCommand} 2>&1) && echo "$VID_OUT" && ` +
+        ? `VID_OUT=$(${config.rolloutUploadCommand} 2>&1); VID_RC=$?; echo "$VID_OUT"; [ $VID_RC -eq 0 ] && ` +
           `VID=$(echo "$VID_OUT" | grep -oE 'Worker Version ID: [0-9a-f-]+' | head -1 | sed 's/.*: //') && ` +
-          `[ -n "$VID" ] && ` +
+          `([ -n "$VID" ] || { echo "no Worker Version ID in upload output" >&2; exit 1; }) && ` +
           `for PCT in ${(config.rolloutSteps ?? [10, 50, 100]).join(" ")}; do ` +
           `${config.rolloutPromoteCommand} && sleep ${config.rolloutSettleSec}; done && ` +
           `${config.deployCommand}`
