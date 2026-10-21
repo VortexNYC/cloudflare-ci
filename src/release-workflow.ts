@@ -80,7 +80,7 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
         }
         // Return the stdout tail — step output is inspectable via
         // `wrangler workflows instances describe` after the run.
-        return result.stdout.slice(-1200);
+        return result.stdout.slice(-2400);
       });
       console.log(`[release] ${repo} ${tag} ok — tail: ${tail}`);
     } finally {

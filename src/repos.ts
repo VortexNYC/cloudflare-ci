@@ -203,7 +203,8 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       '-d "{\"tag_name\":\"$TAG\",\"generate_release_notes\":true}" | grep -oE \\"id\\":[0-9]+ | head -1 | cut -d: -f2) && ' +
       'for F in dist/pile-*; do curl -sf -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
       '-H "Content-Type: application/octet-stream" --data-binary "@$F" ' +
-      '"https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$(basename $F)"; done',
+      '"https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$(basename $F)"; done; ' +
+      'echo "RID=$RID" && ls -la dist/',
     rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     rolloutPromoteCommand:
       'pnpm exec wrangler versions deploy "$VID@$PCT%" -e production -y',
