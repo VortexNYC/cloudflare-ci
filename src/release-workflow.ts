@@ -136,15 +136,23 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
           if (!obj) continue;
           const name = asset.key.split("/").pop()!.replace(/\.gz$/, "");
           if (uploaded.has(name)) continue;
-          // Decompress to R2 by stream — materializing a ~100MB binary in
-          // isolate memory OOMs the isolate (the canary's network-lost).
-          const rawKey = `releases/${tag}/raw/${name}`;
-          await this.env.BACKUP_BUCKET.put(
-            rawKey,
-            obj.body.pipeThrough(new DecompressionStream("gzip"))
+          // R2 rejects streams of unknown length, and a ~100MB
+          // arrayBuffer OOMs the isolate. The gzip trailer's last 4 bytes
+          // carry the uncompressed size — wrap the decompression in a
+          // FixedLengthStream and pipe it straight into the upload.
+          const tailObj = await this.env.BACKUP_BUCKET.get(asset.key, {
+            range: { offset: asset.size - 4 },
+          });
+          if (!tailObj) throw new Error(`release: ${asset.key} missing`);
+          const isize = new DataView(await tailObj.arrayBuffer()).getUint32(
+            0,
+            true
           );
-          const raw = await this.env.BACKUP_BUCKET.get(rawKey);
-          if (!raw) throw new Error(`release: ${rawKey} not stored`);
+          const fixed = new FixedLengthStream(isize);
+          obj.body
+            .pipeThrough(new DecompressionStream("gzip"))
+            .pipeTo(fixed.writable)
+            .catch(() => {});
           const up = await fetch(
             `https://uploads.github.com/repos/${repo}/releases/${id}/assets?name=${name}`,
             {
@@ -152,9 +160,9 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
               headers: {
                 ...ghHeaders,
                 "Content-Type": "application/octet-stream",
-                "Content-Length": String(raw.size),
+                "Content-Length": String(isize),
               },
-              body: raw.body,
+              body: fixed.readable,
               // @ts-expect-error Workers fetch supports duplex for streams
               duplex: "half",
             }
@@ -164,7 +172,6 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
               `asset ${name} upload ${up.status}: ${await up.text()}`
             );
           }
-          await this.env.BACKUP_BUCKET.delete(rawKey);
           await this.env.BACKUP_BUCKET.delete(asset.key);
         }
         return id;
