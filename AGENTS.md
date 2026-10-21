@@ -114,6 +114,12 @@ against cloudflare's repo when there's bandwidth.
 - All admin routes: `Authorization: Bearer $ADMIN_TOKEN`, timing-safe.
 - Deploys reset live sandbox DO isolates — **never deploy while a run is
   in flight**; check `wrangler workflows instances list cloudflare-ci`.
+- The OAuth token sees two accounts (Vortex NYC `953346ce…` = prod,
+  Vortex-old `31bfc2c…` = stale) and wrangler defaults to the wrong one.
+  Prefix every wrangler call — including `pnpm deploy` — with
+  `CLOUDFLARE_ACCOUNT_ID=953346ce1b4f27fa04a76d83aeccab28`. A wrong-account
+  deploy uploads the worker, then dies at the container step with
+  "application … associated with a different durable object namespace".
 - `wrangler.jsonc` has one `triggers` block holding BOTH `events` and
   `crons` — duplicate keys silently drop the push trigger.
 - Stuck run: `wrangler workflows instances terminate cloudflare-ci <id>`,
