@@ -361,7 +361,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       "(cd identity/login && pnpm exec wrangler deploy) && " +
       "(cd apps/mail && pnpm exec wrangler deploy) && " +
       "(cd apps/site && pnpm exec wrangler deploy) && " +
-      "(cd apps/docs && pnpm exec wrangler deploy) && " +
+      "(cd apps/docs && pnpm exec wrangler deploy --config dist/server/wrangler.json) && " +
       "(cd apps/backup-ingest && pnpm exec wrangler deploy)",
     previewCommand:
       '(cd apps/vault && pnpm exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
