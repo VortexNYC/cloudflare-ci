@@ -66,6 +66,7 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
           env: {
             GITHUB_TOKEN: this.env.CHECKS_GITHUB_TOKEN ?? "",
             NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+            ADMIN_TOKEN: this.env.ADMIN_TOKEN ?? "",
             REPO: repo,
             TAG: tag,
             SHA: sha,
@@ -78,11 +79,63 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
             `release failed (${result.exitCode}): ${result.stderr.slice(-2000)}`
           );
         }
-        // Return the stdout tail — step output is inspectable via
-        // `wrangler workflows instances describe` after the run.
         return result.stdout.slice(-2400);
       });
-      console.log(`[release] ${repo} ${tag} ok — tail: ${tail}`);
+      console.log(`[release] ${repo} ${tag} build ok — tail: ${tail}`);
+
+      // The container can't reach api.github.com (egress is git-only) —
+      // binaries were PUT to the worker; the release publishes from here.
+      await step.do("publish github release", async () => {
+        const listed = await this.env.BACKUP_BUCKET.list({
+          prefix: `releases/${tag}/`,
+        });
+        const assets = listed.objects.filter((o) => o.size > 0);
+        if (assets.length === 0) {
+          throw new Error("release: no assets uploaded by the build");
+        }
+        const ghHeaders = {
+          Authorization: `Bearer ${this.env.CHECKS_GITHUB_TOKEN}`,
+          "User-Agent": "cloudflare-ci",
+        };
+        const rel = await fetch(
+          `https://api.github.com/repos/${repo}/releases`,
+          {
+            method: "POST",
+            headers: { ...ghHeaders, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tag_name: tag,
+              generate_release_notes: true,
+            }),
+          }
+        );
+        if (!rel.ok) {
+          throw new Error(`release create ${rel.status}: ${await rel.text()}`);
+        }
+        const { id } = (await rel.json()) as { id: number };
+        for (const asset of assets) {
+          const obj = await this.env.BACKUP_BUCKET.get(asset.key);
+          if (!obj) continue;
+          const name = asset.key.split("/").pop()!;
+          const up = await fetch(
+            `https://uploads.github.com/repos/${repo}/releases/${id}/assets?name=${name}`,
+            {
+              method: "POST",
+              headers: {
+                ...ghHeaders,
+                "Content-Type": "application/octet-stream",
+              },
+              body: obj.body,
+            }
+          );
+          if (!up.ok) {
+            throw new Error(
+              `asset ${name} upload ${up.status}: ${await up.text()}`
+            );
+          }
+          await this.env.BACKUP_BUCKET.delete(asset.key);
+        }
+        return id;
+      });
     } finally {
       await withScheduler("release", (stub) => stub.release(sandboxId)).catch(
         () => {}
