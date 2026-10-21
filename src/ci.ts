@@ -486,8 +486,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           env: baseEnv,
           config: {
             timeout: (config.watchSec + 2 * 60) * 1000,
-            commandTimeoutMs:
-              config.watchSec * 1000 + VERIFY_COMMAND_TIMEOUT_MS,
+            commandTimeoutMs: config.watchSec * 1000 + 30_000,
           },
         });
       } catch (watchError) {
