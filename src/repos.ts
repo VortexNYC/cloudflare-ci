@@ -263,12 +263,47 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
 
   vortex: {
     name: "vortex",
+    installEnv: {
+      HOME: "/tmp",
+      CI: "true",
+      VP_GIT_HOOKS: "0",
+    },
+    // sdk:build + entrypoints (root `build`), then the apps whose deploys
+    // read dist/ — dashboard/landing/docs static bundles + cde's hosted pkg.
+    buildCommand:
+      "pnpm exec vp run build && " +
+      "pnpm exec vp run -F ./apps/dashboard build && " +
+      "pnpm exec vp run -F ./apps/landing build && " +
+      "pnpm exec vp run -F ./apps/docs build && " +
+      "pnpm exec vp run -F @vortex/hosted build",
     // Automated PlanetScale migrations (replaces the manual `pscale role
     // reset` + `db:migrate` runbook): the migrate step runs off the deps
-    // snapshot — vortex has no build/deploy path onboarded yet.
+    // snapshot — the deploy below then skips re-migrating (SKIP_MIGRATE=1).
     migrateCommand:
       'DATABASE_URL="$VORTEX_MIGRATE_URL" pnpm --filter @vortexnyc/money-kernel db:migrate',
     migrateSecrets: ["VORTEX_MIGRATE_URL"],
+    // Every worker in the monorepo ships on main — same all-apps model as
+    // seal. deploy-worker.sh gates on migrations; the pipeline's migrate
+    // step already ran them, so SKIP_MIGRATE=1 keeps ordering in CI.
+    deployCommand:
+      "SKIP_MIGRATE=1 bash scripts/deploy-worker.sh && " +
+      "(cd packages/global && pnpm exec vp exec wrangler deploy) && " +
+      "(cd apps/dashboard && pnpm exec vp exec wrangler deploy) && " +
+      "(cd apps/landing && pnpm exec vp exec wrangler deploy) && " +
+      "(cd apps/docs && pnpm exec vp exec wrangler deploy --config dist/server/wrangler.json) && " +
+      "(cd apps/element-cdn && pnpm exec vp exec wrangler deploy) && " +
+      "(cd apps/ops-relay && pnpm exec vp exec wrangler deploy) && " +
+      "(cd apps/anydoc-worker && pnpm exec vp exec wrangler deploy -e production) && " +
+      "(cd packages/cde-worker && pnpm exec vp exec wrangler deploy) && " +
+      "(cd packages/ci-worker && pnpm exec vp exec wrangler deploy)",
+    previewCommand:
+      '(cd packages/worker && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
+      '(cd apps/dashboard && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
+      '(cd apps/landing && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
+      '(cd apps/docs && pnpm exec vp exec wrangler versions upload --config dist/server/wrangler.json --preview-alias "$CI_PREVIEW_ALIAS")',
+    // api.vortex.nyc serves /health even during maintenance windows — a 200
+    // right after deploy proves the upload serves, not just uploads.
+    verifyCommand: "curl -fsS --max-time 15 https://api.vortex.nyc/health",
     checksInstallCommand:
       '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
       'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +
@@ -307,7 +342,33 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
   },
   veil: {
     name: "veil",
-    // Flip-2 config: secret-scan runs the repo's own scan; ci is the full
+    installEnv: {
+      HOME: "/tmp",
+      CI: "true",
+      VP_GIT_HOOKS: "0",
+    },
+    // Vault SPA + login + docs are the surfaces that build dist/; mail,
+    // site, and backup-ingest deploy straight from source.
+    buildCommand:
+      "pnpm --filter veil-vault run build && " +
+      "pnpm --filter identity-login run build && " +
+      "pnpm --filter @vortex-api/veil-docs run build",
+    // Origin (Go API) stays on Railway — this ships only the Cloudflare
+    // surface: app.veil.nyc, login.veil.nyc, veil.nyc, mail relay, docs,
+    // and the backup WAL ingest worker.
+    deployCommand:
+      "(cd apps/vault && pnpm exec wrangler deploy) && " +
+      "(cd identity/login && pnpm exec wrangler deploy) && " +
+      "(cd apps/mail && pnpm exec wrangler deploy) && " +
+      "(cd apps/site && pnpm exec wrangler deploy) && " +
+      "(cd apps/docs && pnpm exec wrangler deploy) && " +
+      "(cd apps/backup-ingest && pnpm exec wrangler deploy)",
+    previewCommand:
+      '(cd apps/vault && pnpm exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
+      '(cd identity/login && pnpm exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
+      '(cd apps/site && pnpm exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS")',
+    // app.veil.nyc is the surface customers land on — 200 after deploy.
+    verifyCommand: "curl -fsS --max-time 15 https://app.veil.nyc",
     // `make ci` gate — needs postgres booted first (PG_TEST_DSN below).
     checksInstallCommand:
       "service postgresql start >/dev/null 2>&1 || " +
