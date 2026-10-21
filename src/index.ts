@@ -382,6 +382,21 @@ async function handleGitHubWebhook(
   return Response.json({ ok: true, id });
 }
 
+async function handleDrill(request: Request, env: Bindings): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers
+    .get("authorization")
+    ?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const instance = await env.CANARY_WORKFLOW.create({
+    id: `drill-${Date.now()}`,
+    params: { drill: true },
+  });
+  return Response.json({ id: instance.id });
+}
+
 export default {
   fetch(request: Request, env: Bindings) {
     const { pathname } = new URL(request.url);
@@ -429,6 +444,12 @@ export default {
     }
     if (pathname === "/admin/sandbox/release" && request.method === "POST") {
       return handleSandboxRelease(request, env);
+    }
+    // On-demand failure drill — pushes to the throwaway `drill` repo on main
+    // so deploy → watch → rollback exercises end-to-end against
+    // cloudflare-ci-drill workers, not real prod.
+    if (pathname === "/admin/drill" && request.method === "POST") {
+      return handleDrill(request, env);
     }
     if (pathname.startsWith("/admin/")) {
       return new Response("Not Found", { status: 404 });
