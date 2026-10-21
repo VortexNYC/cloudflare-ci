@@ -402,8 +402,16 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           `CUR=$(pnpm exec wrangler deployments list -e production 2>/dev/null | grep -oE '[0-9a-f-]{36}' | grep -vxF "$VID" | head -1); ` +
           `PROMOTE(){ ${config.rolloutPromoteCommand} "$@"; }; ` +
           `if [ -z "$MIG_OUT" ]; then for PCT in ${(config.rolloutSteps ?? [10, 50, 100]).join(" ")}; do ` +
-          `if [ -n "$CUR" ] && [ "$PCT" -lt 100 ]; then PROMOTE "$CUR"; else PROMOTE; fi && ` +
-          `sleep ${config.rolloutSettleSec} || { ROLLBACK; exit 1; }; done; fi && ` +
+          `if [ -n "$CUR" ] && [ "$PCT" -lt 100 ]; then P_OUT=$(PROMOTE "$CUR" 2>&1); else P_OUT=$(PROMOTE 2>&1); fi; P_RC=$?; ` +
+          `echo "$P_OUT"; ` +
+          `if [ $P_RC -ne 0 ]; then ` +
+          `if echo "$P_OUT" | grep -q "identical Durable Object-managed"; then ` +
+          // A version that changes container declarations can't share a
+          // multi-version split — jump straight to 100% instead of rolling
+          // back a deploy that was never wrong.
+          `PCT=100 PROMOTE || { ROLLBACK; exit 1; }; break; ` +
+          `else ROLLBACK; exit 1; fi; fi; ` +
+          `sleep ${config.rolloutSettleSec}; done; fi && ` +
           `${config.deployCommand} || { ROLLBACK; exit 1; }`
         : `${config.deployCommand}`);
 
