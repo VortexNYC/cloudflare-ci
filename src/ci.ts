@@ -7,6 +7,7 @@ import {
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { Bindings } from "./env";
 import { getRepoConfig } from "./repos";
+import { capturePostHog } from "./posthog";
 
 const MINUTE = 60 * 1000;
 
@@ -79,6 +80,36 @@ const buildCleanupCommand =
 
 export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
   protected async pipeline(
+    _event: WorkflowEvent<CiParams<CloudflareArtifacts>>,
+    step: WorkflowStep,
+    ci: CiContext
+  ): Promise<void> {
+    const started = Date.now();
+    const base = {
+      repo: String(_event.payload.repo),
+      branch: String(_event.payload.branch),
+      sha: String(_event.payload.sha ?? ""),
+      instanceId: _event.instanceId,
+      trigger: String(_event.payload.type ?? ""),
+    };
+    await capturePostHog(this.env, "ci.run.started", base);
+    try {
+      await this.pipelineBody(_event, step, ci);
+    } catch (err) {
+      await capturePostHog(this.env, "ci.run.errored", {
+        ...base,
+        durationMs: Date.now() - started,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+    await capturePostHog(this.env, "ci.run.completed", {
+      ...base,
+      durationMs: Date.now() - started,
+    });
+  }
+
+  private async pipelineBody(
     _event: WorkflowEvent<CiParams<CloudflareArtifacts>>,
     step: WorkflowStep,
     ci: CiContext

@@ -8,6 +8,9 @@ export type Bindings = CiBindings & {
   CF_TOKEN_MIGRATE?: string;
   // Seal sourcemap upload (apps/web vite closeBundle → posthog-cli).
   POSTHOG_CLI_API_KEY?: string;
+  // Engineering signal connector — pipeline events land in PostHog.
+  POSTHOG_CI_API_KEY?: string;
+  POSTHOG_CI_HOST?: string;
   ADMIN_TOKEN?: string;
   SANDBOX_LITE: DurableObjectNamespace<CiSandbox>;
   CI_SCHEDULER: DurableObjectNamespace<CiScheduler>;
