@@ -79,10 +79,10 @@ index aa6068d5ab399caf3f018e5c7c4a691da57931a7..6a099012bf44e7f529e25328d4eb1273
    ttlSeconds?: number;
  };
 diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
-index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1365523c7 100644
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4bbc9f196f4f1bc9d0bc07a1064fff1e3f624477 100644
 --- a/src/ci/runners/sandbox.ts
 +++ b/src/ci/runners/sandbox.ts
-@@ -17,13 +17,51 @@ const WORKSPACE_DIR = '/workspace';
+@@ -17,13 +17,46 @@ const WORKSPACE_DIR = '/workspace';
  const STDOUT_FILE = '/tmp/ci-step.out';
  const STDERR_FILE = '/tmp/ci-step.err';
  const COMMAND_TIMEOUT_MS = 11 * 60 * 1000;
@@ -108,11 +108,6 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
 +// How long a step may wait for sandbox capacity before failing. Long enough
 +// to ride out a sibling run's step, short enough to surface real saturation.
 +const ADMIT_TIMEOUT_MS = 10 * 60 * 1000;
-+// destroy() has no internal bound — a wedged containers control plane would
-+// hold the step (and its caller's RPC) open until the step timeout. On
-+// timeout the reservation stays on the scheduler ledger so the stale reaper
-+// retries the teardown instead of silently leaking the slot.
-+const DESTROY_TIMEOUT_MS = 60 * 1000;
 +
 +// Structural type for the worker's CI_SCHEDULER durable object — this package
 +// can't import the host worker's DO class.
@@ -135,7 +130,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
  
  export class SandboxRunner implements Runner<DirectoryBackup> {
    readonly name = 'sandbox';
-@@ -38,22 +76,68 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -38,22 +71,57 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
    async run(
      input: RunStepInput & { restore?: DirectoryBackup }
    ): Promise<RunStepResult<DirectoryBackup>> {
@@ -154,31 +149,19 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
 +    const scheduler = getScheduler(this.env);
 +    if (scheduler) {
 +      const deadline = Date.now() + ADMIT_TIMEOUT_MS;
-+      const backoff = () =>
-+        new Promise((resolve) =>
-+          setTimeout(resolve, 2000 + Math.random() * 3000)
-+        );
 +      for (;;) {
-+        let verdict;
-+        try {
-+          verdict = await scheduler.admit({
-+            pool,
-+            name: runnerName,
-+            instanceId: input.instanceId,
-+          });
-+        } catch (error) {
-+          // A scheduler DO recycled mid-call reports "this Durable Object
-+          // instance is no longer active" — admission is idempotent, so retry
-+          // within the same budget instead of failing the whole step.
-+          if (Date.now() >= deadline) throw error;
-+          await backoff();
-+          continue;
-+        }
++        const verdict = await scheduler.admit({
++          pool,
++          name: runnerName,
++          instanceId: input.instanceId,
++        });
 +        if (verdict.ok) break;
 +        if (Date.now() >= deadline) {
 +          throw new Error(`sandbox admission timed out: ${verdict.reason}`);
 +        }
-+        await backoff();
++        await new Promise((resolve) =>
++          setTimeout(resolve, 2000 + Math.random() * 3000)
++        );
 +      }
 +    }
 +    const sandbox = getSandbox(
@@ -190,6 +173,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
 +        transport: 'rpc',
 +        enableDefaultSession: false,
 +        containerTimeouts: { portReadyTimeoutMS: PORT_READY_TIMEOUT_MS },
++        sleepAfter: '30m',
 +      }
 +    );
  
@@ -215,7 +199,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
          // Overlay (no rm) so cached node_modules survive while tracked source
          // files are refreshed to this commit. The restored archive may carry a
          // different commit's source (e.g. a reused install cache), so this is
-@@ -67,12 +151,14 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -67,12 +135,14 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
              env: checkoutSourceEnv(input.source),
            }
          );
@@ -230,7 +214,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
        }
  
        const proc = await sandbox.startProcess(
-@@ -86,22 +172,40 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+@@ -86,22 +156,40 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
            autoCleanup: false,
          }
        );
@@ -281,54 +265,17 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
        const rawLogs = await readLogs(sandbox);
        const streams = [rawLogs.stdout, rawLogs.stderr].filter(
          (value): value is ReadableStream<Uint8Array> =>
-@@ -111,32 +215,32 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
-         return { exitCode, logs: rawLogs, preview, snapshot };
-       }
- 
--      let remainingStreams = streams.length;
--      const releaseStream = async () => {
--        remainingStreams -= 1;
--        if (remainingStreams === 0) {
+@@ -115,7 +203,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+       const releaseStream = async () => {
+         remainingStreams -= 1;
+         if (remainingStreams === 0) {
 -          await destroySandbox(sandbox);
--        }
-+      // Workflow steps serialize their return value — a ReadableStream is
-+      // not serializable, so oversized logs (build output > INLINE_LOG_BYTES,
-+      // e.g. blume's verbose docs build) kill the step with
-+      // "returned a value which is not serialisable". Drain streams eagerly,
-+      // keep the tail (errors live at the end), and destroy the sandbox
-+      // inline — deferring via withCleanup only exists for streams we hand
-+      // back, which we no longer do.
-+      const drain = async (
-+        value: string | ReadableStream<Uint8Array>
-+      ): Promise<string> => {
-+        if (typeof value === 'string') return value;
-+        const text = await new Response(value).text();
-+        return text.length > INLINE_LOG_BYTES
-+          ? text.slice(-INLINE_LOG_BYTES)
-+          : text;
++          await destroySandbox(sandbox, scheduler, runnerName);
+         }
        };
--      cleanupTransferredToStreams = true;
--      return {
--        exitCode,
--        logs: {
--          stdout:
--            typeof rawLogs.stdout === 'string'
--              ? rawLogs.stdout
--              : withCleanup(rawLogs.stdout, releaseStream),
--          stderr:
--            typeof rawLogs.stderr === 'string'
--              ? rawLogs.stderr
--              : withCleanup(rawLogs.stderr, releaseStream),
--        },
--        preview,
--        snapshot,
-+      const logs = {
-+        stdout: await drain(rawLogs.stdout),
-+        stderr: await drain(rawLogs.stderr),
+       cleanupTransferredToStreams = true;
+@@ -136,7 +224,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
        };
-+      await destroySandbox(sandbox, scheduler, runnerName);
-+      cleanupTransferredToStreams = true;
-+      return { exitCode, logs, preview, snapshot };
      } finally {
        if (!cleanupTransferredToStreams) {
 -        await destroySandbox(sandbox);
@@ -336,7 +283,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
        }
      }
    }
-@@ -204,9 +308,14 @@ function withCleanup(
+@@ -204,9 +292,14 @@ function withCleanup(
  ) {
    const reader = stream.getReader();
    let released = false;
@@ -351,7 +298,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
        await release();
      }
    };
-@@ -239,10 +348,35 @@ function createRunnerId(label: string) {
+@@ -239,10 +332,25 @@ function createRunnerId(label: string) {
    return `${slugify(label).slice(0, 16)}-${crypto.randomUUID()}`;
  }
  
@@ -362,23 +309,12 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
 +  runnerName?: string
 +) {
 +  let destroyed = false;
-+  let timer: ReturnType<typeof setTimeout> | undefined;
    try {
--    await sandbox.destroy();
-+    destroyed = await Promise.race([
-+      sandbox.destroy().then(() => true as const),
-+      new Promise<false>((resolve) => {
-+        timer = setTimeout(() => resolve(false), DESTROY_TIMEOUT_MS);
-+      }),
-+    ]);
-+    if (!destroyed) {
-+      console.error('Timed out destroying CI sandbox', { runnerName });
-+    }
+     await sandbox.destroy();
++    destroyed = true;
    } catch (error) {
      console.error('Failed to destroy CI sandbox', { error });
-+  } finally {
-+    clearTimeout(timer);
-+  }
+   }
 +  // Release on successful destroy; on failure keep the reservation so the
 +  // stale reaper retries instead of silently leaking the slot.
 +  if (destroyed && scheduler && runnerName) {
@@ -387,7 +323,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..576f9331b7de3a6adb78889d7ae122b1
 +    } catch {
 +      // stale reservation is reaped by age
 +    }
-   }
++  }
  }
 diff --git a/src/ci/step-notification.ts b/src/ci/step-notification.ts
 index 2d70c69e664aa3083fec8346bd51ca2d41101cdc..24e81dbae7f86541a690ebf8a49588bf5d81ad3e 100644
@@ -490,59 +426,3 @@ index a1f5ff3aa8c30350300f3bd8d1f25cbc850aff65..45a25b88517ae625e6e3c354bf9c6515
    cloudflareCredentials?: boolean | { accountId: string };
    // Inject provider-specific source-control credentials into the command env.
    sourceControlCredentials?: boolean;
-diff --git a/src/shared/source-checkout.ts b/src/shared/source-checkout.ts
-index f83770cfc430aacd3c257dc90e46ae8b2fa8be51..012c5143099fe35e322992d771abf0078eddd501 100644
---- a/src/shared/source-checkout.ts
-+++ b/src/shared/source-checkout.ts
-@@ -23,15 +23,43 @@ export function checkoutSourceScript(
-   if (source.kind === 'archive') {
-     return `${prepare} && curl --connect-timeout 10 --max-time 300 --fail --silent --show-error --location ${shellQuote(source.url)} | tar -xz --strip-components=1 -C ${shellQuote(workspace)}`;
-   }
--  return [
-+  const clone = shellQuote(CLONE_DIR);
-+  const marker = `${shellQuote(workspace)}/.ci-source-sha`;
-+  const lines = [
-     prepare,
--    `rm -rf ${shellQuote(CLONE_DIR)}`,
--    `git init -q ${shellQuote(CLONE_DIR)}`,
--    `git -C ${shellQuote(CLONE_DIR)} remote add origin ${shellQuote(source.remote)}`,
--    `git -c http.extraHeader="Authorization: Bearer $SOURCE_CONTROL_TOKEN" -C ${shellQuote(CLONE_DIR)} fetch --depth=1 origin ${shellQuote(source.sha)}`,
--    `git -C ${shellQuote(CLONE_DIR)} checkout --detach FETCH_HEAD`,
--    `tar --exclude=.git -C ${shellQuote(CLONE_DIR)} -cf - . | tar -C ${shellQuote(workspace)} -xf -`,
--  ].join(' && ');
-+    `rm -rf ${clone}`,
-+    `git init -q ${clone}`,
-+    `git -C ${clone} remote add origin ${shellQuote(source.remote)}`,
-+    `git -c http.extraHeader="Authorization: Bearer $SOURCE_CONTROL_TOKEN" -C ${clone} fetch --depth=1 origin ${shellQuote(source.sha)}`,
-+    `git -C ${clone} checkout --detach FETCH_HEAD`,
-+  ];
-+  if (overlay) {
-+    // The restored snapshot carries a previous commit's tree; the tar overlay
-+    // refreshes changed files but never removes them, so deleted sources
-+    // linger forever. Two sync modes:
-+    //   marker present — diff marker-sha..this-sha and remove deleted paths
-+    //     (surgical: never touches generated output like dist/).
-+    //   marker missing — bootstrap: reconcile the workspace to the clone's
-+    //     tracked file set, pruning caches and build output dirs. Runs once
-+    //     per snapshot; the marker then lands and later runs go surgical.
-+    // Both non-fatal — a pruned sha or empty marker just skips the sync.
-+    lines.push(
-+      `if OLD_SHA=$(cat ${marker} 2>/dev/null) && ` +
-+        `git -C ${clone} fetch -q --depth=1 origin "$OLD_SHA" 2>/dev/null; then ` +
-+        `git -C ${clone} diff --name-only --diff-filter=D "$OLD_SHA" ${shellQuote(source.sha)} | ` +
-+        `while IFS= read -r f; do rm -f "${shellQuote(workspace)}/$f"; done; ` +
-+        `else ` +
-+        `( cd ${clone} && find . -name .git -prune -o -type f -print | sed 's|^\\./||' | sort > /tmp/ci-expected ) && ` +
-+        `( cd ${shellQuote(workspace)} && find . -name node_modules -prune -o -name .git -prune -o -name dist -prune -o -name .pnpm-store -prune -o -name .wrangler -prune -o -name .next -prune -o -name .output -prune -o -name .turbo -prune -o -name coverage -prune -o -type f -print | sed 's|^\\./||' | sort > /tmp/ci-present ) && ` +
-+        `comm -23 /tmp/ci-present /tmp/ci-expected | while IFS= read -r f; do rm -f "${shellQuote(workspace)}/$f"; done; ` +
-+        `fi || true`
-+    );
-+  }
-+  lines.push(
-+    `tar --exclude=.git -C ${clone} -cf - . | tar -C ${shellQuote(workspace)} -xf -`,
-+    `printf '%s' ${shellQuote(source.sha)} > ${marker}`
-+  );
-+  return lines.join(' && ');
- }
- 
- export function checkoutSourceEnv(source: SourceControlCheckout) {
