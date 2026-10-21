@@ -198,8 +198,9 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "pnpm add -D @opentui/core-darwin-arm64 @opentui/core-darwin-x64 >> /tmp/install.log 2>&1 && " +
       'for T in linux-x64 darwin-arm64 darwin-x64; do pnpm dlx bun build --compile --minify --target=bun-$T src/index.ts --outfile "dist/pile-$T" >> /tmp/build.log 2>&1 || exit 1; done && ' +
       'ls -la dist/ && ' +
+      'printf "{\"tag_name\":\"$TAG\",\"generate_release_notes\":true}" > /tmp/rel-payload.json && ' +
       'CODE=$(curl -s -o /tmp/rel.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
-      '"https://api.github.com/repos/$REPO/releases" -d "{\"tag_name\":\"$TAG\",\"generate_release_notes\":true}") && ' +
+      '"https://api.github.com/repos/$REPO/releases" -d "@/tmp/rel-payload.json") && ' +
       'echo "create: $CODE" >&2 && [ "$CODE" = "201" ] || { cat /tmp/rel.json >&2; exit 1; } && ' +
       'RID=$(grep -oE "id\\":[0-9]+" /tmp/rel.json | head -1 | cut -d: -f2) && echo "RID=$RID" >&2 && ' +
       'for F in dist/pile-*; do ' +
