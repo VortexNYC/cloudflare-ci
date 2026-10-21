@@ -58,7 +58,7 @@ export class CanaryWorkflow extends WorkflowEntrypoint<Bindings, { drill?: boole
             "mkdir -p src",
             `printf '%s\\n' '{"name":"canary","private":true,"version":"0.0.0"}' > package.json`,
             `printf 'lockfileVersion: "9.0"\\nimporters:\\n  .: {}\\npackages: {}\\nsnapshots: {}\\n' > pnpm-lock.yaml`,
-            `printf 'name = "$WORKER_NAME"\\nmain = "src/index.js"\\ncompatibility_date = "2026-07-30"\\n' > wrangler.toml`,
+            `printf "name = \\"$WORKER_NAME\\"\\nmain = \\"src/index.js\\"\\ncompatibility_date = \\"2026-07-30\\"\\n" > wrangler.toml`,
             `printf '%s\\n' 'export default { async fetch(r) { return new URL(r.url).pathname === "/health" ? Response.json({ok:true,canary:true}) : new Response("canary"); } };' > src/index.js`,
             'date +%s > TICK',
             'git add -A && git commit -qm "tick $(cat TICK)" --no-verify',
