@@ -61,7 +61,7 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
           "git checkout -q FETCH_HEAD",
         ].join(" && ");
         const result = await sandbox.runCheck({
-          checkoutScript: clone + " && curl -sI -o /dev/null -w 'uploads:%{http_code}\\n' --max-time 10 https://uploads.github.com || echo uploads:unreachable" + " && curl -sI -o /dev/null -w 'api:%{http_code}\\n' --max-time 10 https://api.github.com || echo api:unreachable" + " && curl -sI -o /dev/null -w 'gh:%{http_code}\\n' --max-time 10 https://github.com || echo gh:unreachable" + " && echo probe-done",
+          checkoutScript: clone,
           script: `cd /workspace && ${config.releaseCommand}`,
           env: {
             GITHUB_TOKEN: this.env.CHECKS_GITHUB_TOKEN ?? "",
