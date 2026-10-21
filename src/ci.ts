@@ -376,46 +376,13 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     // (VTX-582) the worker ships via versions upload + staged promote —
     // traffic percentages in order — and deployCommand covers only the
     // non-versioned extras.
-    const deployCommand =
-      `${npmrcCommand} && ` +
-      `${relinkCommand} && ` +
-      (config.rolloutUploadCommand && config.rolloutPromoteCommand
-        ? `VID_OUT=$(${config.rolloutUploadCommand} 2>&1); VID_RC=$?; echo "$VID_OUT"; ` +
-          `if [ $VID_RC -ne 0 ] && echo "$VID_OUT" | grep -q "pending Durable Object migration"; then ` +
-          `MIG_OUT=$(echo ${JSON.stringify(config.rolloutUploadCommand)} | sed 's/versions upload/deploy/' | sh 2>&1); MRC=$?; ` +
-          `echo "$MIG_OUT"; [ $MRC -eq 0 ] || exit 1; ` +
-          `VID=$(echo "$MIG_OUT" | grep -oE 'Current Version ID: [0-9a-f-]+' | head -1 | sed 's/.*: //'); ` +
-          `else ` +
-          `[ $VID_RC -eq 0 ] || exit 1; ` +
-          `VID=$(echo "$VID_OUT" | grep -oE 'Worker Version ID: [0-9a-f-]+' | head -1 | sed 's/.*: //'); ` +
-          `fi; ` +
-          `([ -n "$VID" ] || { echo "no Worker Version ID in deploy output" >&2; exit 1; }) && ` +
-          // Rollback is inline, not a workflow step: it only exists past the
-          // VID guard, so a failure before any version took traffic can never
-          // roll prod back for nothing.
-          (config.rollbackCommand
-            ? `ROLLBACK(){ ${config.rollbackCommand}; }; `
-            : `ROLLBACK(){ :; }; `) +
-          // versions deploy needs specs totalling 100% — a lone vid@10%
-          // throws "must total exactly 100%". The current version carries
-          // the remainder (omitted percentage), so promote in pairs.
-          `CUR=$(pnpm exec wrangler deployments list -e production 2>/dev/null | grep -oE '[0-9a-f-]{36}' | grep -vxF "$VID" | head -1); ` +
-          `PROMOTE(){ ${config.rolloutPromoteCommand} "$@"; }; ` +
-          `if [ -z "$MIG_OUT" ]; then for PCT in ${(config.rolloutSteps ?? [10, 50, 100]).join(" ")}; do ` +
-          `if [ -n "$CUR" ] && [ "$PCT" -lt 100 ]; then P_OUT=$(PROMOTE "$CUR" 2>&1); else P_OUT=$(PROMOTE 2>&1); fi; P_RC=$?; ` +
-          `echo "$P_OUT"; ` +
-          `if [ $P_RC -ne 0 ]; then ` +
-          `if echo "$P_OUT" | grep -q "identical Durable Object-managed"; then ` +
-          // A version that changes container declarations can't share a
-          // multi-version split — jump straight to 100%. If even that fails
-          // and no promote ever took traffic, exit plain: a rollback here
-          // would flip prod to an older version for nothing.
-          `PCT=100 PROMOTE || { [ -n "$PROMOTED" ] && ROLLBACK; exit 1; }; break; ` +
-          `else ROLLBACK; exit 1; fi; fi; ` +
-          `PROMOTED=1; ` +
-          `sleep ${config.rolloutSettleSec}; done; fi && ` +
-          `${config.deployCommand} || { ROLLBACK; exit 1; }`
-        : `${config.deployCommand}`);
+    const rollout =
+      config.rolloutUploadCommand && config.rolloutPromoteCommand
+        ? {
+            upload: config.rolloutUploadCommand,
+            promote: config.rolloutPromoteCommand,
+          }
+        : null;
 
     // VTX-583: a failed gate (deploy promote, verify, or the post-rollout
     // watch below) runs rollbackCommand instead of leaving the bad deploy
@@ -445,29 +412,148 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         });
     };
 
-    // Codex: a mid-rollout promote failure would leave the traffic split
-    // live — deploy failures roll back the same way verify/watch do.
-    try {
-      await buildResult.runner({
-        name: "deploy",
-        command: bound(deployCommand, DEPLOY_COMMAND_TIMEOUT_MS),
-        secrets: ["NPM_TOKEN", ...config.deploySecrets],
-        persist: false,
-        cloudflareCredentials: {
-          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
-        },
-        env: baseEnv,
-        config: {
-          timeout: DEPLOY_STEP_TIMEOUT_MS,
-          commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
-        },
-      });
-    } catch (deployError) {
-      // Rollback is inline in the deploy command — it only exists past the
-      // VID guard, so a failure before any version took traffic can never
-      // roll prod back for nothing.
-      throw deployError;
+    if (rollout) {
+      // VTX-618 — the promote loop is separate runner steps, one per
+      // traffic stage, so a superseded check (a real step.do against the
+      // scheduler, not an in-shell read) can abort a stale deploy between
+      // percentages and CUR is resampled fresh inside each stage's
+      // container. The upload step echoes CI_UPLOAD_VID / CI_UPLOAD_MIG
+      // markers — logs are the only channel a runner has to hand shell
+      // state to the workflow.
+      const uploadCommand =
+        `${npmrcCommand} && ` +
+        `${relinkCommand} && ` +
+        `VID_OUT=$(${rollout.upload} 2>&1); VID_RC=$?; echo "$VID_OUT"; ` +
+        `if [ $VID_RC -ne 0 ] && echo "$VID_OUT" | grep -q "pending Durable Object migration"; then ` +
+        `MIG_OUT=$(echo ${JSON.stringify(rollout.upload)} | sed 's/versions upload/deploy/' | sh 2>&1); MRC=$?; ` +
+        `echo "$MIG_OUT"; [ $MRC -eq 0 ] || exit 1; ` +
+        `VID=$(echo "$MIG_OUT" | grep -oE 'Current Version ID: [0-9a-f-]+' | head -1 | sed 's/.*: //'); ` +
+        `echo "CI_UPLOAD_MIG=1"; ` +
+        `else ` +
+        `[ $VID_RC -eq 0 ] || exit 1; ` +
+        `VID=$(echo "$VID_OUT" | grep -oE 'Worker Version ID: [0-9a-f-]+' | head -1 | sed 's/.*: //'); ` +
+        `fi; ` +
+        `([ -n "$VID" ] || { echo "no Worker Version ID in deploy output" >&2; exit 1; }) && ` +
+        `echo "CI_UPLOAD_VID=$VID"`;
+
+      const promoteCommand = (vid: string, pct: number): string =>
+        `${npmrcCommand} && ` +
+        `${relinkCommand} && ` +
+        `VID=${JSON.stringify(vid)}; PCT=${pct}; ` +
+        // versions deploy needs specs totalling 100% — a lone vid@10%
+        // throws "must total exactly 100%". The current version carries
+        // the remainder (omitted percentage), so promote in pairs. CUR is
+        // resampled per stage: a concurrent deploy between stages leaves a
+        // stale pair partner otherwise.
+        `CUR=$(pnpm exec wrangler deployments list -e production 2>/dev/null | grep -oE '[0-9a-f-]{36}' | grep -vxF "$VID" | head -1); ` +
+        `PROMOTE(){ ${rollout.promote} "$@"; }; ` +
+        `if [ -n "$CUR" ] && [ "$PCT" -lt 100 ]; then P_OUT=$(PROMOTE "$CUR" 2>&1); else P_OUT=$(PROMOTE 2>&1); fi; P_RC=$?; ` +
+        `echo "$P_OUT"; ` +
+        `if [ $P_RC -ne 0 ]; then ` +
+        `if echo "$P_OUT" | grep -q "identical Durable Object-managed"; then ` +
+        // A version that changes container declarations can't share a
+        // multi-version split — jump straight to 100% inside this stage.
+        `PCT=100 PROMOTE && echo "CI_PROMOTE_FULL=1" || exit 1; ` +
+        `else exit 1; fi; fi`;
+
+      const stdoutText = async (result: {
+        logs: { stdout: string | ReadableStream<Uint8Array> };
+      }) =>
+        typeof result.logs.stdout === "string"
+          ? result.logs.stdout
+          : await new Response(result.logs.stdout).text();
+
+      const deployStep = (name: string, command: string) =>
+        buildResult.runner({
+          name,
+          command: bound(command, DEPLOY_COMMAND_TIMEOUT_MS),
+          secrets: ["NPM_TOKEN", ...config.deploySecrets],
+          persist: false,
+          cloudflareCredentials: {
+            accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+          },
+          env: baseEnv,
+          config: {
+            timeout: DEPLOY_STEP_TIMEOUT_MS,
+            commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+          },
+        });
+
+      // Upload failure moves no traffic — propagate before any rollback
+      // machinery exists to fire.
+      const upload = await deployStep("deploy-upload", uploadCommand);
+      const uploadOut = await stdoutText(upload);
+      const vid = /CI_UPLOAD_VID=([0-9a-f-]{36})/.exec(uploadOut)?.[1];
+      if (!vid) {
+        throw new Error(
+          "versions upload produced no CI_UPLOAD_VID marker — aborting before any traffic moved"
+        );
+      }
+      // The pending-migration path is already a plain deploy at 100% —
+      // nothing to stage.
+      if (!uploadOut.includes("CI_UPLOAD_MIG=1")) {
+        let promotedAny = false;
+        for (const pct of config.rolloutSteps ?? [10, 50, 100]) {
+          // A newer claim mid-rollout owns the rollout — exit and let it
+          // converge the partial split against live CUR. Rolling back here
+          // would fight the live run.
+          winner = await supersededBy(`dedupe-promote-${pct}`);
+          if (winner) {
+            console.log(
+              `[cloudflare-ci] superseded by ${winner} mid-rollout — leaving the split for the newer run`
+            );
+            return;
+          }
+          try {
+            const promote = await deployStep(
+              `deploy-promote-${pct}`,
+              promoteCommand(vid, pct)
+            );
+            promotedAny = true;
+            if ((await stdoutText(promote)).includes("CI_PROMOTE_FULL=1")) {
+              break;
+            }
+          } catch (promoteError) {
+            // Only a promote that already moved traffic rolls back — a
+            // failed first stage flipped nothing.
+            if (promotedAny) await rollback(`promote ${pct}%`);
+            throw promoteError;
+          }
+          await step.sleep(
+            `rollout-settle-${pct}`,
+            config.rolloutSettleSec * 1000
+          );
+        }
+      }
     }
+
+    const deployCommand =
+      `${npmrcCommand} && ` +
+      `${relinkCommand} && ` +
+      (rollout
+        ? // Rollback is inline, not a workflow step: it only exists past
+          // the upload stage, so a failure before any version took traffic
+          // can never roll prod back for nothing.
+          (config.rollbackCommand
+            ? `ROLLBACK(){ ${config.rollbackCommand}; }; `
+            : `ROLLBACK(){ :; }; `) +
+          `${config.deployCommand} || { ROLLBACK; exit 1; }`
+        : `${config.deployCommand}`);
+
+    await buildResult.runner({
+      name: "deploy",
+      command: bound(deployCommand, DEPLOY_COMMAND_TIMEOUT_MS),
+      secrets: ["NPM_TOKEN", ...config.deploySecrets],
+      persist: false,
+      cloudflareCredentials: {
+        accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+      },
+      env: baseEnv,
+      config: {
+        timeout: DEPLOY_STEP_TIMEOUT_MS,
+        commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+      },
+    });
 
     // Post-deploy proof, same lite-pool shape as migrate: self-contained
     // command, no workspace restore. A non-zero exit fails the run — a
