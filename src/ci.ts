@@ -90,7 +90,6 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       branch: String(_event.payload.branch),
       sha: String(_event.payload.sha ?? ""),
       instanceId: _event.instanceId,
-      trigger: String(_event.payload.type ?? ""),
     };
     await capturePostHog(this.env, "ci.run.started", base);
     try {
