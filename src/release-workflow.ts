@@ -147,7 +147,7 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
           // OOMs the isolate (hard ~100MB cap); the gzip (~35MB) streams
           // fine. Asset keeps the .gz suffix; consumers gunzip.
           const up = await fetch(
-            `https://uploads.github.com/repos/${repo}/releases/${id}/assets?name=${name}.gz`,
+            `https://uploads.github.com/repos/${repo}/releases/${id}/assets?name=${name}`,
             {
               method: "POST",
               headers: {
