@@ -97,30 +97,54 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
           Authorization: `Bearer ${this.env.CHECKS_GITHUB_TOKEN}`,
           "User-Agent": "cloudflare-ci",
         };
-        const rel = await fetch(
-          `https://api.github.com/repos/${repo}/releases`,
-          {
-            method: "POST",
-            headers: { ...ghHeaders, "Content-Type": "application/json" },
-            body: JSON.stringify({
-              tag_name: tag,
-              generate_release_notes: true,
-            }),
-          }
+        // Idempotent across retries: a partially-published release (the
+        // earlier attempt's 422 already_exists) resumes rather than fails.
+        const existing = await fetch(
+          `https://api.github.com/repos/${repo}/releases/tags/${tag}`,
+          { headers: ghHeaders }
         );
-        if (!rel.ok) {
-          throw new Error(`release create ${rel.status}: ${await rel.text()}`);
+        let id: number;
+        let uploaded = new Set<string>();
+        if (existing.ok) {
+          const rel = (await existing.json()) as {
+            id: number;
+            assets: { name: string }[];
+          };
+          id = rel.id;
+          uploaded = new Set(rel.assets.map((a) => a.name));
+        } else {
+          const rel = await fetch(
+            `https://api.github.com/repos/${repo}/releases`,
+            {
+              method: "POST",
+              headers: { ...ghHeaders, "Content-Type": "application/json" },
+              body: JSON.stringify({
+                tag_name: tag,
+                generate_release_notes: true,
+              }),
+            }
+          );
+          if (!rel.ok) {
+            throw new Error(
+              `release create ${rel.status}: ${await rel.text()}`
+            );
+          }
+          id = ((await rel.json()) as { id: number }).id;
         }
-        const { id } = (await rel.json()) as { id: number };
         for (const asset of assets) {
           const obj = await this.env.BACKUP_BUCKET.get(asset.key);
           if (!obj) continue;
           const name = asset.key.split("/").pop()!.replace(/\.gz$/, "");
-          // Binaries arrive gzipped — the sandbox's egress body cap killed
-          // raw ~100MB PUTs. Decompress here before the GitHub upload.
-          const raw = await new Response(
+          if (uploaded.has(name)) continue;
+          // Decompress to R2 by stream — materializing a ~100MB binary in
+          // isolate memory OOMs the isolate (the canary's network-lost).
+          const rawKey = `releases/${tag}/raw/${name}`;
+          await this.env.BACKUP_BUCKET.put(
+            rawKey,
             obj.body.pipeThrough(new DecompressionStream("gzip"))
-          ).arrayBuffer();
+          );
+          const raw = await this.env.BACKUP_BUCKET.get(rawKey);
+          if (!raw) throw new Error(`release: ${rawKey} not stored`);
           const up = await fetch(
             `https://uploads.github.com/repos/${repo}/releases/${id}/assets?name=${name}`,
             {
@@ -128,8 +152,11 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
               headers: {
                 ...ghHeaders,
                 "Content-Type": "application/octet-stream",
+                "Content-Length": String(raw.size),
               },
-              body: raw,
+              body: raw.body,
+              // @ts-expect-error Workers fetch supports duplex for streams
+              duplex: "half",
             }
           );
           if (!up.ok) {
@@ -137,6 +164,7 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
               `asset ${name} upload ${up.status}: ${await up.text()}`
             );
           }
+          await this.env.BACKUP_BUCKET.delete(rawKey);
           await this.env.BACKUP_BUCKET.delete(asset.key);
         }
         return id;
