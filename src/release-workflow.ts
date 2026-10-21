@@ -48,7 +48,7 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
       throw new Error(`release: ${admission.reason ?? "checks pool at capacity"}`);
     }
     try {
-      await step.do("build + publish release", async () => {
+      const tail = await step.do("build + publish release", async () => {
         const sandbox = this.env.CHECKS_SANDBOX.getByName(sandboxId);
         // Tokens ride the container env — never argv (process listings).
         const clone = [
@@ -78,12 +78,11 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
             `release failed (${result.exitCode}): ${result.stderr.slice(-2000)}`
           );
         }
-        // Success path is otherwise a black box — log the tail so the
-        // release step's curl output is inspectable in workflow logs.
-        console.log(
-          `[release] ${repo} ${tag} ok — stdout tail: ${result.stdout.slice(-1000)}`
-        );
+        // Return the stdout tail — step output is inspectable via
+        // `wrangler workflows instances describe` after the run.
+        return result.stdout.slice(-1200);
       });
+      console.log(`[release] ${repo} ${tag} ok — tail: ${tail}`);
     } finally {
       await withScheduler("release", (stub) => stub.release(sandboxId)).catch(
         () => {}
