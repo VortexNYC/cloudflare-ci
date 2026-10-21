@@ -396,8 +396,14 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           (config.rollbackCommand
             ? `ROLLBACK(){ ${config.rollbackCommand}; }; `
             : `ROLLBACK(){ :; }; `) +
+          // versions deploy needs specs totalling 100% — a lone vid@10%
+          // throws "must total exactly 100%". The current version carries
+          // the remainder (omitted percentage), so promote in pairs.
+          `CUR=$(pnpm exec wrangler deployments list -e production 2>/dev/null | grep -oE '[0-9a-f-]{36}' | grep -vxF "$VID" | head -1); ` +
+          `PROMOTE(){ ${config.rolloutPromoteCommand} "$@"; }; ` +
           `if [ -z "$MIG_OUT" ]; then for PCT in ${(config.rolloutSteps ?? [10, 50, 100]).join(" ")}; do ` +
-          `${config.rolloutPromoteCommand} && sleep ${config.rolloutSettleSec} || { ROLLBACK; exit 1; }; done; fi && ` +
+          `if [ -n "$CUR" ] && [ "$PCT" -lt 100 ]; then PROMOTE "$CUR"; else PROMOTE; fi && ` +
+          `sleep ${config.rolloutSettleSec} || { ROLLBACK; exit 1; }; done; fi && ` +
           `${config.deployCommand} || { ROLLBACK; exit 1; }`
         : `${config.deployCommand}`);
 
