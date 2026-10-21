@@ -79,7 +79,7 @@ index aa6068d5ab399caf3f018e5c7c4a691da57931a7..6a099012bf44e7f529e25328d4eb1273
    ttlSeconds?: number;
  };
 diff --git a/src/ci/runners/sandbox.ts b/src/ci/runners/sandbox.ts
-index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4bbc9f196f4f1bc9d0bc07a1064fff1e3f624477 100644
+index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..2d98d2efb9875a69f62853f4c26e4793ee42da84 100644
 --- a/src/ci/runners/sandbox.ts
 +++ b/src/ci/runners/sandbox.ts
 @@ -17,13 +17,46 @@ const WORKSPACE_DIR = '/workspace';
@@ -265,17 +265,40 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4bbc9f196f4f1bc9d0bc07a1064fff1e
        const rawLogs = await readLogs(sandbox);
        const streams = [rawLogs.stdout, rawLogs.stderr].filter(
          (value): value is ReadableStream<Uint8Array> =>
-@@ -115,7 +203,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
-       const releaseStream = async () => {
-         remainingStreams -= 1;
-         if (remainingStreams === 0) {
+@@ -111,32 +199,16 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
+         return { exitCode, logs: rawLogs, preview, snapshot };
+       }
+ 
+-      let remainingStreams = streams.length;
+-      const releaseStream = async () => {
+-        remainingStreams -= 1;
+-        if (remainingStreams === 0) {
 -          await destroySandbox(sandbox);
-+          await destroySandbox(sandbox, scheduler, runnerName);
-         }
-       };
-       cleanupTransferredToStreams = true;
-@@ -136,7 +224,7 @@ export class SandboxRunner implements Runner<DirectoryBackup> {
-       };
+-        }
+-      };
+-      cleanupTransferredToStreams = true;
+-      return {
+-        exitCode,
+-        logs: {
+-          stdout:
+-            typeof rawLogs.stdout === 'string'
+-              ? rawLogs.stdout
+-              : withCleanup(rawLogs.stdout, releaseStream),
+-          stderr:
+-            typeof rawLogs.stderr === 'string'
+-              ? rawLogs.stderr
+-              : withCleanup(rawLogs.stderr, releaseStream),
+-        },
+-        preview,
+-        snapshot,
+-      };
++      // Workflow step results must serialize through step.do — ReadableStreams
++      // cannot. Cancel the live streams and hand back the bounded tail preview
++      // instead; the full files live in the snapshot backup.
++      await Promise.all(
++        streams.map((stream) => stream.cancel().catch(() => undefined))
++      );
++      return { exitCode, logs: preview, preview, snapshot };
      } finally {
        if (!cleanupTransferredToStreams) {
 -        await destroySandbox(sandbox);
@@ -283,7 +306,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4bbc9f196f4f1bc9d0bc07a1064fff1e
        }
      }
    }
-@@ -204,9 +292,14 @@ function withCleanup(
+@@ -204,9 +276,14 @@ function withCleanup(
  ) {
    const reader = stream.getReader();
    let released = false;
@@ -298,7 +321,7 @@ index 4fb4a42354cdc9fbc18c930b0f3396c7a979d036..4bbc9f196f4f1bc9d0bc07a1064fff1e
        await release();
      }
    };
-@@ -239,10 +332,25 @@ function createRunnerId(label: string) {
+@@ -239,10 +316,25 @@ function createRunnerId(label: string) {
    return `${slugify(label).slice(0, 16)}-${crypto.randomUUID()}`;
  }
  
