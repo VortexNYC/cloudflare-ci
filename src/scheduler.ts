@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { getSandbox } from "@cloudflare/sandbox";
 import type { CiParams, CloudflareArtifacts } from "@cloudflare/ci";
 import type { Bindings } from "./env";
+import { capturePostHog } from "./posthog";
 
 export type PoolName = "SANDBOX" | "SANDBOX_LITE" | "CHECKS" | "EXTERNAL";
 
@@ -357,6 +358,16 @@ export class CiScheduler extends DurableObject<Bindings> {
       }
       // Flip to errored so reconcileClaims' refire path treats it as dead.
       await this.ctx.storage.put(key, { ...claim, status: "errored" });
+      // PostHog sees wedges as events, not just as silence — the step's own
+      // timeout can't fire once the isolate's dead, so the sweep reports.
+      const [repo, branch] = key.replace(/^claim\//, "").split("/");
+      await capturePostHog(this.env, "ci.run.wedged", {
+        repo,
+        branch,
+        instanceId: claim.instanceId,
+        sha: claim.sha,
+        ageMs: Date.now() - claim.at,
+      });
     }
   }
 
