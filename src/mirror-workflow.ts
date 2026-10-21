@@ -20,15 +20,15 @@ async function resolveArtifactsToken(
   env: Bindings,
   repo: string
 ): Promise<string> {
-  // Same two-path contract as artifacts-sync.yml: mint a 15-min repo token
-  // when a minting credential exists; otherwise use the stored push token
-  // (a long-TTL artifact, rotated before expiry).
-  if (env.ARTIFACTS_PUSH_TOKEN) return env.ARTIFACTS_PUSH_TOKEN;
-  // CF_TOKEN is the worker's existing CF API secret and covers the common
-  // case where one token has Artifacts:Write.
+  // Mint a fresh 15-min repo-scoped token whenever a minting credential
+  // exists — Artifacts tokens are repo-scoped, so the stored push token
+  // only covers the repo it was minted for (it was minted for pile; other
+  // repos got "Invalid or expired token"). The static token stays as
+  // fallback for when the mint API is unreachable.
   const apiToken =
     env.ARTIFACTS_API_TOKEN ?? env.CLOUDFLARE_API_TOKEN ?? env.CF_TOKEN;
   if (!apiToken || !env.ARTIFACTS_ACCOUNT_ID) {
+    if (env.ARTIFACTS_PUSH_TOKEN) return env.ARTIFACTS_PUSH_TOKEN;
     throw new Error("artifacts mirror: no mint token, push token, or ACCOUNT_ID");
   }
   const res = await fetch(
@@ -47,6 +47,12 @@ async function resolveArtifactsToken(
     }
   );
   if (!res.ok) {
+    if (env.ARTIFACTS_PUSH_TOKEN) {
+      console.log(
+        `artifacts token mint ${res.status} — falling back to stored push token`
+      );
+      return env.ARTIFACTS_PUSH_TOKEN;
+    }
     const text = await res.text();
     throw new Error(`artifacts token mint ${res.status}: ${text}`);
   }
@@ -94,7 +100,8 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
         const clone = [
           "set -euo pipefail",
           "git init -q --bare /workspace && cd /workspace",
-          'git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
+          // Retries re-enter the same sandbox — the remote may already exist.
+          'git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" 2>/dev/null || git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
           // Fetch the event's SHA, not the branch tip — two overlapping
           // pushes would otherwise let an older workflow mirror a stale tip
           // over the newer one. GitHub permits fetching reachable SHAs.
