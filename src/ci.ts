@@ -95,10 +95,12 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     try {
       await this.pipelineBody(_event, step, ci);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       await capturePostHog(this.env, "ci.run.errored", {
         ...base,
         durationMs: Date.now() - started,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
+        step: /CiRunnerFailure: ([a-z0-9-]+) failed/i.exec(message)?.[1],
       });
       throw err;
     }
