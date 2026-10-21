@@ -20,45 +20,26 @@ async function resolveArtifactsToken(
   env: Bindings,
   repo: string
 ): Promise<string> {
-  // Mint a fresh 15-min repo-scoped token whenever a minting credential
-  // exists — Artifacts tokens are repo-scoped, so the stored push token
-  // only covers the repo it was minted for (it was minted for pile; other
-  // repos got "Invalid or expired token"). The static token stays as
-  // fallback for when the mint API is unreachable.
-  const apiToken =
-    env.ARTIFACTS_API_TOKEN ?? env.CLOUDFLARE_API_TOKEN ?? env.CF_TOKEN;
-  if (!apiToken || !env.ARTIFACTS_ACCOUNT_ID) {
-    if (env.ARTIFACTS_PUSH_TOKEN) return env.ARTIFACTS_PUSH_TOKEN;
-    throw new Error("artifacts mirror: no mint token, push token, or ACCOUNT_ID");
+  // The ARTIFACTS binding is the control plane — get() returns null for a
+  // repo that was never pushed, so create() first (the initial token also
+  // comes back free). Tokens are repo-scoped and minted per push (15 min)
+  // — the old REST mint path produced tokens the git endpoint rejected.
+  const repoName = repo.split("/")[1] ?? repo;
+  let handle: ArtifactsRepo | null = null;
+  try {
+    handle = await env.ARTIFACTS.get(repoName);
+  } catch {
+    handle = null;
   }
-  const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${env.ARTIFACTS_ACCOUNT_ID}/artifacts/namespaces/${ARTIFACTS_NS}/tokens`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        repo: repo.split("/")[1],
-        scope: "write",
-        ttl: 900,
-      }),
-    }
-  );
-  if (!res.ok) {
-    if (env.ARTIFACTS_PUSH_TOKEN) {
-      console.log(
-        `artifacts token mint ${res.status} — falling back to stored push token`
-      );
-      return env.ARTIFACTS_PUSH_TOKEN;
-    }
-    const text = await res.text();
-    throw new Error(`artifacts token mint ${res.status}: ${text}`);
+  if (!handle) {
+    const created = await env.ARTIFACTS.create(repoName, {
+      description: `${repo} — mirrored by cloudflare-ci`,
+    });
+    if (created.token) return created.token;
+    handle = await env.ARTIFACTS.get(repoName);
   }
-  const body = (await res.json()) as { plaintext?: string };
-  if (!body.plaintext) throw new Error("artifacts token mint: no plaintext");
-  return body.plaintext;
+  const minted = await handle.createToken("write", 900);
+  return minted.plaintext;
 }
 
 export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
