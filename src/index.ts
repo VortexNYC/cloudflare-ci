@@ -173,6 +173,29 @@ async function handleChecksCache(
   return new Response("OK", { status: 200 });
 }
 
+// Release artifact staging — same Bearer auth as the cache route. The
+// ReleaseWorkflow lists `releases/<tag>/` after the build and publishes
+// each object to the GitHub release, then deletes it.
+async function handleReleaseAssetPut(
+  request: Request,
+  env: Bindings,
+  tag: string,
+  name: string
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers
+    .get("authorization")
+    ?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  if (!request.body) return new Response("Bad Request", { status: 400 });
+  await env.BACKUP_BUCKET.put(`releases/${tag}/${name}`, request.body, {
+    httpMetadata: { contentType: "application/octet-stream" },
+  });
+  return new Response("OK", { status: 200 });
+}
+
 // Escape hatch for sandboxes whose step wedged before destroy() ran — a dead
 // exec stream or abandoned log stream leaves the container billing forever.
 async function handleSandboxKill(
@@ -375,6 +398,19 @@ export default {
     const cacheMatch = pathname.match(/^\/admin\/cache\/([a-z0-9-]+)$/);
     if (cacheMatch && (request.method === "GET" || request.method === "PUT")) {
       return handleChecksCache(request, env, cacheMatch[1]!);
+    }
+    // Release asset upload (VTX-603): the release sandbox can't reach
+    // api.github.com — it PUTs binaries here; the workflow publishes.
+    const releaseAssetMatch = pathname.match(
+      /^\/admin\/release-asset\/([a-z0-9.-]+)\/([a-z0-9._-]+)$/i
+    );
+    if (releaseAssetMatch && request.method === "PUT") {
+      return handleReleaseAssetPut(
+        request,
+        env,
+        releaseAssetMatch[1]!,
+        releaseAssetMatch[2]!
+      );
     }
     if (pathname === "/admin/sandbox/kill" && request.method === "POST") {
       return handleSandboxKill(request, env);
