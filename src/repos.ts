@@ -228,12 +228,6 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     // bindings but has no queue consumer, no cron, no EMAIL — last branch
     // pushed wins. Pinned container digests mean no Docker needed.
     previewCommand: "pnpm exec wrangler deploy -e staging",
-  },
-  canary: {
-    name: "canary",
-    installEnv: { HOME: "/tmp", CI: "true", VP_GIT_HOOKS: "0" },
-    buildCommand: "echo canary",
-    previewCommand: "pnpm exec wrangler deploy --name cloudflare-ci-canary && curl -fsS --max-time 15 https://cloudflare-ci-canary.vortex-nyc.workers.dev/health",
     verifyCommand: 'curl -fsS --max-time 15 https://pile.nyc/health',
     d1Database: "pile-global",
     d1MigrationsCwd: ".",
@@ -265,6 +259,28 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       // gitleaks rides the platform baseline — .gitleaks.toml is
       // auto-detected by the baseline command.
     ],
+  },
+  canary: {
+    name: "canary",
+    installEnv: { HOME: "/tmp", CI: "true", VP_GIT_HOOKS: "0" },
+    buildCommand: "echo canary",
+    previewCommand: "pnpm exec wrangler deploy --name cloudflare-ci-canary && curl -fsS --max-time 15 https://cloudflare-ci-canary.vortex-nyc.workers.dev/health",
+  },
+  // Drill — main-branch push against throwaway workers so deploy → watch →
+  // rollback exercises end-to-end. Manual trigger only (the canary workflow's
+  // drill param); every run errors on purpose, which also proves the alert.
+  drill: {
+    name: "drill",
+    installEnv: { HOME: "/tmp", CI: "true", VP_GIT_HOOKS: "0" },
+    buildCommand: "echo drill",
+    previewCommand: "pnpm exec wrangler deploy --name cloudflare-ci-drill-staging",
+    stagingVerifyCommand: "curl -fsS --max-time 15 https://cloudflare-ci-drill-staging.vortex-nyc.workers.dev/health",
+    stagingBakeSec: 15,
+    deployCommand: "pnpm exec wrangler deploy --name cloudflare-ci-drill",
+    verifyCommand: "curl -fsS --max-time 15 https://cloudflare-ci-drill.vortex-nyc.workers.dev/health",
+    watchCommand: "exit 1",
+    watchSec: 10,
+    rollbackCommand: "pnpm exec wrangler rollback --name cloudflare-ci-drill",
   },
 
   vortex: {
@@ -400,7 +416,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
   },
 };
 
-const repoNameSchema = z.enum(["seal", "pile", "veil", "vortex", "canary"]);
+const repoNameSchema = z.enum(["seal", "pile", "veil", "vortex", "canary", "drill"]);
 
 // Platform baseline (VTX-580): gates every repo inherits regardless of its
 // own `checks` — merged by name so a repo entry overrides the baseline, and
