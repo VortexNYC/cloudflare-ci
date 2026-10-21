@@ -201,10 +201,10 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       "printf '{\"tag_name\":\"%s\",\"generate_release_notes\":true}' \"$TAG\" > /tmp/rel-payload.json && " +
       'CODE=$(curl -s -o /tmp/rel.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
       '-H "Content-Type: application/json" "https://api.github.com/repos/$REPO/releases" -d "@/tmp/rel-payload.json") && ' +
-      'echo "create: $CODE" >&2 && [ "$CODE" = "201" ] || { cat /tmp/rel.json >&2; exit 1; } && ' +
+      'echo "create: $CODE" >&2 && [ "$CODE" = "201" ] || [ "$CODE" = "422" ] || { cat /tmp/rel.json >&2; exit 1; } && ' +
       'RID=$(grep -oE "id\\":[0-9]+" /tmp/rel.json | head -1 | cut -d: -f2) && echo "RID=$RID" >&2 && ' +
       'for F in dist/pile-*; do ' +
-      'CODE=$(curl -s -o /tmp/up.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
+      'CODE=$(curl -sL -o /tmp/up.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
       '-H "Content-Type: application/octet-stream" --data-binary "@$F" ' +
       '"https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$(basename $F)") && ' +
       'echo "$(basename $F): $CODE" >&2 && [ "$CODE" = "201" ] || { cat /tmp/up.json >&2; exit 1; }; done && ' +

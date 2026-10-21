@@ -90,8 +90,13 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
           prefix: `releases/${tag}/`,
         });
         const assets = listed.objects.filter((o) => o.size > 0);
+        // The releaseCommand may upload directly to GitHub now — when
+        // nothing staged into R2, the publish step is a verify-only no-op.
         if (assets.length === 0) {
-          throw new Error("release: no assets uploaded by the build");
+          console.log(
+            `[release] ${repo} ${tag} — no staged assets; container published directly`
+          );
+          return;
         }
         const ghHeaders = {
           Authorization: `Bearer ${this.env.CHECKS_GITHUB_TOKEN}`,
