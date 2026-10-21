@@ -191,20 +191,23 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     // cli-v* tag pushes: cross-compile all targets from Linux (no macOS)
     // and publish the GitHub release — replaces cli-binary.yml.
     releaseCommand:
-      // Quiet the noisy phases — the step output tail shows only the
-      // release-relevant tail. GitHub API egress is worker-only, so the
-      // binaries PUT to the worker's /admin/release-asset endpoint and
-      // the workflow publishes the release itself.
+      // Direct upload — the probe shows api.github.com + uploads.github.com
+      // are reachable from the container, so the raw ~100MB binaries go
+      // straight to GitHub (no worker relay, no gzip, no body cap).
       "cd packages/cli && pnpm install --frozen-lockfile > /tmp/install.log 2>&1 && " +
       "pnpm add -D @opentui/core-darwin-arm64 @opentui/core-darwin-x64 >> /tmp/install.log 2>&1 && " +
       'for T in linux-x64 darwin-arm64 darwin-x64; do pnpm dlx bun build --compile --minify --target=bun-$T src/index.ts --outfile "dist/pile-$T" >> /tmp/build.log 2>&1 || exit 1; done && ' +
       'ls -la dist/ && ' +
-      'for F in dist/pile-*; do gzip -9 -k "$F"; done && ' +
-      'for F in dist/pile-*.gz; do CODE=$(curl -s -o /tmp/up.json -w "%{http_code}" -X PUT ' +
-      '-H "Authorization: Bearer $ADMIN_TOKEN" --data-binary "@$F" ' +
-      '"https://cloudflare-ci.vortex-nyc.workers.dev/admin/release-asset/$TAG/$(basename $F)") && ' +
-      'echo "$(basename $F): $CODE" >&2 && [ "$CODE" = "200" ] || { cat /tmp/up.json >&2; exit 1; }; done && ' +
-      'echo "assets pushed to worker"',
+      'CODE=$(curl -s -o /tmp/rel.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
+      '"https://api.github.com/repos/$REPO/releases" -d "{\"tag_name\":\"$TAG\",\"generate_release_notes\":true}") && ' +
+      'echo "create: $CODE" >&2 && [ "$CODE" = "201" ] || { cat /tmp/rel.json >&2; exit 1; } && ' +
+      'RID=$(grep -oE "id\\":[0-9]+" /tmp/rel.json | head -1 | cut -d: -f2) && echo "RID=$RID" >&2 && ' +
+      'for F in dist/pile-*; do ' +
+      'CODE=$(curl -s -o /tmp/up.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
+      '-H "Content-Type: application/octet-stream" --data-binary "@$F" ' +
+      '"https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$(basename $F)") && ' +
+      'echo "$(basename $F): $CODE" >&2 && [ "$CODE" = "201" ] || { cat /tmp/up.json >&2; exit 1; }; done && ' +
+      'echo "release complete"',
 rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     rolloutPromoteCommand:
       'pnpm exec wrangler versions deploy "$VID@$PCT%" -e production -y',
