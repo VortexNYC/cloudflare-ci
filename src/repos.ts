@@ -200,7 +200,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       'ls -la dist/ && ' +
       'printf "{\"tag_name\":\"$TAG\",\"generate_release_notes\":true}" > /tmp/rel-payload.json && ' +
       'CODE=$(curl -s -o /tmp/rel.json -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" ' +
-      '"https://api.github.com/repos/$REPO/releases" -d "@/tmp/rel-payload.json") && ' +
+      '-H "Content-Type: application/json" "https://api.github.com/repos/$REPO/releases" -d "@/tmp/rel-payload.json") && ' +
       'echo "create: $CODE" >&2 && [ "$CODE" = "201" ] || { cat /tmp/rel.json >&2; exit 1; } && ' +
       'RID=$(grep -oE "id\\":[0-9]+" /tmp/rel.json | head -1 | cut -d: -f2) && echo "RID=$RID" >&2 && ' +
       'for F in dist/pile-*; do ' +
