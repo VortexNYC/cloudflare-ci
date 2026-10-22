@@ -4,7 +4,12 @@ import type { CiParams, CloudflareArtifacts } from "@cloudflare/ci";
 import type { Bindings } from "./env";
 import { capturePostHog } from "./posthog";
 
-export type PoolName = "SANDBOX" | "SANDBOX_LITE" | "CHECKS" | "EXTERNAL";
+export type PoolName =
+  | "SANDBOX"
+  | "SANDBOX_LITE"
+  | "SANDBOX_HEAVY"
+  | "CHECKS"
+  | "EXTERNAL";
 
 // Per-app container caps — must match max_instances in wrangler.jsonc for
 // the 0.x pools. CHECKS runs on durable_object scheduling (no app cap), so
@@ -14,6 +19,7 @@ export type PoolName = "SANDBOX" | "SANDBOX_LITE" | "CHECKS" | "EXTERNAL";
 const POOL_LIMITS: Record<PoolName, number> = {
   SANDBOX: 10,
   SANDBOX_LITE: 10,
+  SANDBOX_HEAVY: 4,
   CHECKS: 10,
   EXTERNAL: 16,
 };
@@ -121,7 +127,7 @@ export class CiScheduler extends DurableObject<Bindings> {
       return this.env.CHECKS_SANDBOX.getByName(r.name).destroy();
     }
     return getSandbox(
-      this.env[r.pool as "SANDBOX" | "SANDBOX_LITE"],
+      this.env[r.pool as "SANDBOX" | "SANDBOX_LITE" | "SANDBOX_HEAVY"],
       r.name
     ).destroy();
   }

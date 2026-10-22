@@ -209,6 +209,9 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     // downstream steps a workspace whose .pnpm-store already covers install.
     const depsResult = await ci.runner({
       name: "deps",
+      // VTX-622: per-workload pool routing — deps rides the heavy pool when
+      // a repo opts in via buildPool; build picks it up again below.
+      sandbox: config.buildPool,
       command: bound(`${npmrcCommand} && ${installCommand} && ` + cleanupCommand, DEPS_COMMAND_TIMEOUT_MS),
       secrets: ["NPM_TOKEN"],
       env: config.installEnv,
@@ -229,6 +232,9 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     const buildResult = config.buildCommand
       ? await depsResult.runner({
           name: "build",
+          // Chained runners inherit the snapshot, not the pool — pick the
+          // same pool deps used so a heavy build lands on the heavy box.
+          sandbox: config.buildPool,
           command: bound(buildOnlyCommand, BUILD_COMMAND_TIMEOUT_MS),
           secrets: ["NPM_TOKEN", ...config.buildSecrets],
           env: baseEnv,

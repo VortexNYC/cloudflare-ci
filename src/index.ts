@@ -13,6 +13,10 @@ import type { CiScheduler } from "./scheduler";
 // SANDBOX_LITE for steps that don't need a full build machine.
 export class CiSandboxLite extends CiSandbox {}
 
+// Same runtime on a larger instance_type, bound as SANDBOX_HEAVY for
+// deps+build on repos that opt in via buildPool (VTX-622).
+export class CiSandboxHeavy extends CiSandbox {}
+
 export { CiSandbox, CI };
 export { ChecksSandbox };
 export { MirrorWorkflow } from "./mirror-workflow";
@@ -215,7 +219,7 @@ async function handleSandboxKill(
   }
 
   const results: Record<string, string> = {};
-  for (const binding of ["SANDBOX", "SANDBOX_LITE"] as const) {
+  for (const binding of ["SANDBOX", "SANDBOX_LITE", "SANDBOX_HEAVY"] as const) {
     try {
       await getSandbox(env[binding], name).destroy();
       results[binding] = "destroyed";
