@@ -165,11 +165,15 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       // into the SPA bundle by Vite at build time.
       VITE_POSTHOG_KEY: "phc_v5HaYTE3N9siA53wtYmkFHSm28mBATJJsdDjeaobHxC8",
       VITE_POSTHOG_HOST: "https://us.i.posthog.com",
+      // The build box auto-detects a tiny heap and mark-compacts itself to
+      // death on pnpm relink/vite — pin old-space to what standard-2 has.
+      NODE_OPTIONS: "--max-old-space-size=3072",
     },
     installEnv: {
       HOME: "/tmp",
       CI: "true",
       VP_GIT_HOOKS: "0",
+      NODE_OPTIONS: "--max-old-space-size=3072",
     },
     // blume's githubReleases source needs a repo-read token at build time —
     // GITHUB_TOKEN on this worker is the read:packages PAT (releases are

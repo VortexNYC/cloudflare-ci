@@ -379,7 +379,23 @@ export class CiScheduler extends DurableObject<Bindings> {
       if (claim.status !== "running") continue;
       const status = await this.instanceStatus(claim.instanceId);
       if (!status || status === "running" || status === "queued" || status === "paused") continue;
-      const branch = key.slice("claim/".length).split("/").slice(1).join("/");
+      const parts = key.slice("claim/".length).split("/");
+      const branch = parts.slice(1).join("/");
+      if (parts[0] === "drill") {
+        // Drill runs fail on purpose — the failure is the test. Never
+        // refire them as real deploys and never file triage; PostHog
+        // carries the proof the failure path ran.
+        await this.ctx.storage.put(key, { ...claim, status: "errored" });
+        await capturePostHog(this.env, "ci.claim.failed", {
+          repo: parts[0],
+          branch,
+          instanceId: claim.instanceId,
+          sha: claim.sha,
+          status,
+          synthetic: true,
+        });
+        continue;
+      }
       if (branch !== "main") {
         await this.ctx.storage.put(key, { ...claim, status: "errored" });
         await this.reportClaimFailure(
