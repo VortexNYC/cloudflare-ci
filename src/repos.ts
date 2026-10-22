@@ -4,6 +4,11 @@ const repoConfigSchema = z.object({
   name: z.string(),
   buildEnv: z.record(z.string()).default({}),
   installEnv: z.record(z.string()).default({}),
+  // Per-workload pool routing (VTX-622): deps+build run on the heavy pool
+  // when a repo's install/build exceeds the standard-2 shape. The platform
+  // has no per-call resource knob — pool selection is the CF equivalent of
+  // Open-Inspect's cpuCores/memoryMib per launch.
+  buildPool: z.enum(["SANDBOX", "SANDBOX_HEAVY"]).default("SANDBOX"),
   // The only step whose snapshot persists — must produce whatever dist/
   // preview and deploy upload. Checks/tests gate locally via pre-push
   // hooks, not in billable containers.
@@ -175,6 +180,9 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
       VP_GIT_HOOKS: "0",
       NODE_OPTIONS: "--max-old-space-size=3072",
     },
+    // typecheck + web/docs builds OOMed the standard-2 shape even with the
+    // heap pin — run deps+build on the heavy pool.
+    buildPool: "SANDBOX_HEAVY",
     // blume's githubReleases source needs a repo-read token at build time —
     // GITHUB_TOKEN on this worker is the read:packages PAT (releases are
     // readable with it; verified against the pile releases API).

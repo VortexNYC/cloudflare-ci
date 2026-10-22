@@ -27,6 +27,14 @@
       "instance_type": "basic"
     },
     {
+      // Heavy pool for repos whose deps+build exceed the standard-2 shape
+      // (VTX-622 — per-workload routing; pile is the first tenant).
+      "class_name": "CiSandboxHeavy",
+      "image": "./Dockerfile",
+      "max_instances": 4,
+      "instance_type": "standard-3"
+    },
+    {
       // Checks pool on sandbox-sdk 1.0 — each DO starts its own container.
       // New class alongside the 0.x pools: switching an existing class to
       // durable_object scheduling is a one-way deploy, so the checks path
@@ -51,6 +59,10 @@
       {
         "name": "SANDBOX_LITE",
         "class_name": "CiSandboxLite"
+      },
+      {
+        "name": "SANDBOX_HEAVY",
+        "class_name": "CiSandboxHeavy"
       },
       {
         "name": "CI_SCHEDULER",
@@ -112,6 +124,10 @@
       "storage": "sqlite"
     },
     "CiSandboxLite": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "CiSandboxHeavy": {
       "type": "durable-object",
       "storage": "sqlite"
     },

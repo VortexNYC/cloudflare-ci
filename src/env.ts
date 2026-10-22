@@ -13,6 +13,7 @@ export type Bindings = CiBindings & {
   POSTHOG_CI_HOST?: string;
   ADMIN_TOKEN?: string;
   SANDBOX_LITE: DurableObjectNamespace<CiSandbox>;
+  SANDBOX_HEAVY: DurableObjectNamespace<CiSandbox>;
   CI_SCHEDULER: DurableObjectNamespace<CiScheduler>;
   // sandbox-sdk 1.0 checks pool — each named DO owns its container.
   CHECKS_SANDBOX: DurableObjectNamespace<ChecksSandbox>;
