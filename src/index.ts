@@ -397,8 +397,25 @@ async function handleDrill(request: Request, env: Bindings): Promise<Response> {
   return Response.json({ id: instance.id });
 }
 
+// Fail-loud env contract (Open-Inspect env-validation posture): a
+// misconfigured deploy must refuse to serve, not run degraded — an unset
+// ADMIN_TOKEN otherwise 401s silently forever and a missing CF_TOKEN only
+// surfaces mid-sweep.
+let envValidated = false;
+function validateEnv(env: Bindings): void {
+  if (envValidated) return;
+  const bad: string[] = [];
+  if (!env.ADMIN_TOKEN || String(env.ADMIN_TOKEN).length < 32)
+    bad.push("ADMIN_TOKEN (>=32 chars)");
+  if (!env.CF_TOKEN) bad.push("CF_TOKEN");
+  if (bad.length)
+    throw new Error(`cloudflare-ci misconfigured — refusing to serve: ${bad.join(", ")}`);
+  envValidated = true;
+}
+
 export default {
   fetch(request: Request, env: Bindings) {
+    validateEnv(env);
     const { pathname } = new URL(request.url);
     if (pathname === "/webhook/github" && request.method === "POST") {
       return handleGitHubWebhook(request, env);
@@ -457,6 +474,7 @@ export default {
     return new Response("cloudflare-ci", { status: 200 });
   },
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    validateEnv(env);
     ctx.waitUntil(
       (async () => {
         if (event.cron === "*/30 * * * *") {

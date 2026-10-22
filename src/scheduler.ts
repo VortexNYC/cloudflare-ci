@@ -36,6 +36,8 @@ const REAP_DESTROY_TIMEOUT_MS = 30 * 1000;
 // A running claim older than this is wedged — the platform never
 // reports it dead. 45min > 30min build step + deps + preview margins.
 const ZOMBIE_RUN_MS = 45 * 60_000;
+/** Claim lease — a running claim older than this is dead by contract. */
+const CLAIM_TTL_MS = 90 * 60_000;
 
 const REAP_BUDGET_MS = 90 * 1000;
 
@@ -57,6 +59,10 @@ export type RunClaim = {
   params?: CiParams<CloudflareArtifacts>;
   /** Re-fire attempts so a persistently-failing push doesn't loop forever. */
   refires?: number;
+  /** Monotonic token — a stale reconciler can't clobber a newer claim. */
+  fencing?: number;
+  /** Deterministic staleness — dead claims age out without an instance probe. */
+  expiresAt?: number;
 };
 
 type AdmitResult = { ok: true } | { ok: false; reason: string };
@@ -196,13 +202,23 @@ export class CiScheduler extends DurableObject<Bindings> {
     params?: CiParams<CloudflareArtifacts>
   ): Promise<boolean> {
     const existing = await this.getClaim(repo, branch);
-    if (
-      existing &&
-      sha &&
-      existing.sha === sha &&
-      (existing.status === "completed" || existing.status === "errored")
-    ) {
-      return false;
+    if (existing && sha && existing.sha === sha) {
+      if (existing.status === "completed" || existing.status === "errored") {
+        return false;
+      }
+      if (existing.status === "running" && existing.instanceId !== instanceId) {
+        // Duplicate delivery of a run already in flight — same sha, different
+        // instance. Idempotency at ingress (the Open-Inspect delivery:<id>
+        // pattern): log it, don't race a second pipeline.
+        await capturePostHog(this.env, "ci.delivery.duplicate", {
+          repo,
+          branch,
+          sha,
+          instanceId,
+          claimedBy: existing.instanceId,
+        });
+        return false;
+      }
     }
     await this.ctx.storage.put(`claim/${repo}/${branch}`, {
       instanceId,
@@ -210,6 +226,8 @@ export class CiScheduler extends DurableObject<Bindings> {
       status: "running",
       at: Date.now(),
       params,
+      fencing: (existing?.fencing ?? 0) + 1,
+      expiresAt: Date.now() + CLAIM_TTL_MS,
     } satisfies RunClaim);
     return true;
   }
@@ -377,7 +395,13 @@ export class CiScheduler extends DurableObject<Bindings> {
     await this.reapZombieClaims(claims);
     for (const [key, claim] of claims) {
       if (claim.status !== "running") continue;
-      const status = await this.instanceStatus(claim.instanceId);
+      // An expired claim is dead by contract — the lease ran out, so treat
+      // it as terminal without waiting on an instance-status probe.
+      const expired =
+        claim.expiresAt !== undefined && Date.now() > claim.expiresAt;
+      const status = expired
+        ? "errored"
+        : await this.instanceStatus(claim.instanceId);
       if (!status || status === "running" || status === "queued" || status === "paused") continue;
       const parts = key.slice("claim/".length).split("/");
       const branch = parts.slice(1).join("/");
@@ -418,12 +442,19 @@ export class CiScheduler extends DurableObject<Bindings> {
         const created = await this.env.CI_WORKFLOW.create({
           params: claim.params,
         });
+        // Re-read before overwriting — a newer claim() may have landed
+        // while CI_WORKFLOW.create was in flight. Fencing is the guard:
+        // if the row moved, this stale snapshot must not clobber it.
+        const latest = await this.ctx.storage.get<RunClaim>(key);
+        if ((latest?.fencing ?? 0) !== (claim.fencing ?? 0)) continue;
         await this.ctx.storage.put(key, {
           ...claim,
           instanceId: created.id,
           status: "running",
           refires: (claim.refires ?? 0) + 1,
           at: Date.now(),
+          fencing: (claim.fencing ?? 0) + 1,
+          expiresAt: Date.now() + CLAIM_TTL_MS,
         });
         refired.push(key);
       } catch {
