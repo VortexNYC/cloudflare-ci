@@ -112,8 +112,10 @@ against cloudflare's repo when there's bandwidth.
 - `POST /admin/sandbox/sweep` — reap reservations >60min; returns the live
   ledger. Runs unattended hourly via cron (`17 * * * *`).
 - All admin routes: `Authorization: Bearer $ADMIN_TOKEN`, timing-safe.
-- Deploys reset live sandbox DO isolates — **never deploy while a run is
-  in flight**; check `wrangler workflows instances list cloudflare-ci`.
+- Deploys reset live sandbox DO isolates — `pnpm deploy` refuses while a
+  run is in flight. `DRAIN=1 pnpm deploy` terminates in-flight runs
+  deliberately and lets the ledger refire dead claims (VTX-627) — the
+  recovery contract, not an accident.
 - The OAuth token sees two accounts (Vortex NYC `953346ce…` = prod,
   Vortex-old `31bfc2c…` = stale) and wrangler defaults to the wrong one.
   Prefix every wrangler call — including `pnpm deploy` — with
