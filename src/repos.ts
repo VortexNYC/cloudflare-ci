@@ -168,7 +168,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
     buildEnv: {
       // PostHog project key — client-public by design (phc_ prefix), baked
       // into the SPA bundle by Vite at build time.
-      VITE_POSTHOG_KEY: "phc_v5HaYTE3N9siA53wtYmkFHSm28mBATJJsdDjeaobHxC8",
+      VITE_POSTHOG_KEY: "phc_ts2JiKlSqvEC0Cjt68HFUkg3mZnY6CG57QkguxWmn5Y",
       VITE_POSTHOG_HOST: "https://us.i.posthog.com",
       // The build box auto-detects a tiny heap and mark-compacts itself to
       // death on pnpm relink/vite — pin old-space to what standard-2 has.

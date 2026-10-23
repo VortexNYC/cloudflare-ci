@@ -44,8 +44,11 @@ export type Bindings = CiBindings & {
   // tokens can't call the Checks API).
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
-  /** Failure self-report — errored claims file a Pile issue. Optional. */
+  /** Failure self-report — errored claims file a Pile issue and send a native Cloudflare email alert. */
   PILE_BASE_URL?: string;
   PILE_API_KEY?: string;
   PILE_WORKSPACE?: string;
+  EMAIL?: { send(msg: unknown): Promise<void> };
+  ALERT_EMAIL_FROM?: string;
+  ALERT_EMAIL_TO?: string;
 };
