@@ -151,8 +151,15 @@
     // Containers fetch restore archives over HTTP from this worker instead of
     // streaming through the DO isolate (which OOMs on large snapshots).
     "BACKUP_DOWNLOAD_BASE_URL": "https://cloudflare-ci.vortex-nyc.workers.dev",
-    "CLOUDFLARE_ACCOUNT_ID": "953346ce1b4f27fa04a76d83aeccab28"
+    "CLOUDFLARE_ACCOUNT_ID": "953346ce1b4f27fa04a76d83aeccab28",
+    "ALERT_EMAIL_FROM": "Cloudflare CI <noreply@veil.nyc>",
+    "ALERT_EMAIL_TO": "shlomo@vortex.nyc"
   },
+  "send_email": [
+    {
+      "name": "EMAIL"
+    }
+  ],
   "observability": {
     "enabled": true,
     "logs": {
