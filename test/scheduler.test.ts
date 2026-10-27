@@ -235,3 +235,37 @@ test("fresh reservations are never reaped", async () => {
   assert.equal(out.reservations.length, 1);
   assert.deepEqual(__hooks.destroyed, []);
 });
+
+test("check claims are newest-wins by event time — a late older write can't clobber", async () => {
+  const { scheduler } = makeScheduler();
+  await scheduler.claimCheck("pile", "feat-x", "i-old", "sha1", 1000);
+  // a newer push takes the ref
+  await scheduler.claimCheck("pile", "feat-x", "i-new", "sha2", 2000);
+  assert.equal((await scheduler.getCheckClaim("pile", "feat-x"))?.sha, "sha2");
+  // a late-starting workflow for the older push must not overwrite it
+  await scheduler.claimCheck("pile", "feat-x", "i-old2", "sha1", 1500);
+  const claim = await scheduler.getCheckClaim("pile", "feat-x");
+  assert.equal(claim?.sha, "sha2");
+  assert.equal(claim?.instanceId, "i-new");
+});
+
+test("check claims live in their own keyspace — deploy claims are untouched", async () => {
+  const { scheduler, storage } = makeScheduler();
+  await scheduler.claim("pile", "feat-x", "deploy-1", "sha1");
+  await scheduler.claimCheck("pile", "feat-x", "checks-1", "sha1", 1000);
+  const deploy = await scheduler.getClaim("pile", "feat-x");
+  assert.equal(deploy?.instanceId, "deploy-1");
+  assert.equal(deploy?.status, "running");
+  // and the checkclaim key exists alongside the claim/ key
+  assert.ok(storage.map.has("checkclaim/pile/feat-x"));
+  assert.ok(storage.map.has("claim/pile/feat-x"));
+});
+
+test("sweep ages out stale check claims", async () => {
+  const { scheduler, storage } = makeScheduler();
+  await scheduler.claimCheck("pile", "feat-old", "i1", "sha1", Date.now() - 25 * 60 * 60_000);
+  await scheduler.claimCheck("pile", "feat-new", "i2", "sha2", Date.now());
+  await scheduler.sweep();
+  assert.equal(await scheduler.getCheckClaim("pile", "feat-old"), null);
+  assert.equal((await scheduler.getCheckClaim("pile", "feat-new"))?.sha, "sha2");
+});

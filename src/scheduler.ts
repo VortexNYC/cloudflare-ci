@@ -56,6 +56,14 @@ export type Reservation = {
   expiresAt?: number;
 };
 
+export type CheckClaim = {
+  instanceId: string;
+  sha: string;
+  /** WorkflowEvent.timestamp of the claiming run — push order, not the
+   *  order the claim writes happened to land. */
+  eventAt: number;
+};
+
 export type RunClaim = {
   instanceId: string;
   sha?: string;
@@ -242,6 +250,57 @@ export class CiScheduler extends DurableObject<Bindings> {
     return (
       (await this.ctx.storage.get<RunClaim>(`claim/${repo}/${branch}`)) ?? null
     );
+  }
+
+  /**
+   * Newest-wins claim for check runs, keyed on repo + source ref — a
+   * separate keyspace from `claim/` deploy claims so a checks claim can
+   * never clobber a same-branch deploy claim. A check run that is queued
+   * waiting for a pool slot reads this back and cancels itself when it
+   * moved to a newer sha, instead of burning a container on a stale
+   * commit.
+   */
+  async claimCheck(
+    repo: string,
+    branch: string,
+    instanceId: string,
+    sha: string,
+    eventAt: number
+  ): Promise<void> {
+    const key = `checkclaim/${repo}/${branch}`;
+    const existing = await this.ctx.storage.get<CheckClaim>(key);
+    // eventAt is workflow-creation time (webhook arrival order) — a
+    // late-starting workflow for an older push must not overwrite the
+    // claim a newer push already wrote.
+    if (existing && existing.eventAt > eventAt) return;
+    await this.ctx.storage.put(key, {
+      instanceId,
+      sha,
+      eventAt,
+    } satisfies CheckClaim);
+  }
+
+  async getCheckClaim(
+    repo: string,
+    branch: string
+  ): Promise<CheckClaim | null> {
+    return (
+      (await this.ctx.storage.get<CheckClaim>(
+        `checkclaim/${repo}/${branch}`
+      )) ?? null
+    );
+  }
+
+  // checkclaim/ rows are per repo+ref and never deleted — age out
+  // anything past a day; a claim only matters while that ref's runs can
+  // still be queued (the queue bound is far under this).
+  private async reapCheckClaims(): Promise<void> {
+    const cutoff = Date.now() - 24 * 60 * 60_000;
+    for (const [key, claim] of await this.ctx.storage.list<CheckClaim>({
+      prefix: "checkclaim/",
+    })) {
+      if (claim.eventAt < cutoff) await this.ctx.storage.delete(key);
+    }
   }
 
   /** Mark the current winner finished — same-sha duplicates stop re-running. */
@@ -570,6 +629,7 @@ export class CiScheduler extends DurableObject<Bindings> {
     const deadReaped = await this.reapDeadRuns();
     const { refired } = await this.reconcileClaims();
     await this.checkCanarySilence();
+    await this.reapCheckClaims();
     return {
       reaped,
       deadReaped,
