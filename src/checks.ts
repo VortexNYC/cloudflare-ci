@@ -248,13 +248,38 @@ export async function getOrCreateCheckRun(
   return createCheckRun(token, repo, sha, name);
 }
 
+/** Move a check run between non-terminal states — "queued" while it
+ *  waits for a checks-pool slot, "in_progress" once admitted. */
+export async function updateCheckRunStatus(
+  token: string,
+  repo: string,
+  checkRunId: number,
+  status: "queued" | "in_progress",
+  output?: { title: string; summary: string }
+): Promise<void> {
+  await githubApi(token, "PATCH", `/repos/${repo}/check-runs/${checkRunId}`, {
+    status,
+    ...(status === "in_progress"
+      ? { started_at: new Date().toISOString() }
+      : {}),
+    ...(output
+      ? {
+          output: {
+            title: output.title,
+            summary: output.summary.slice(0, 65000),
+          },
+        }
+      : {}),
+  });
+}
+
 /** Close a check run with a conclusion + bounded output. */
 export async function completeCheckRun(
   token: string,
   repo: string,
   checkRunId: number,
   result: {
-    conclusion: "success" | "failure" | "neutral";
+    conclusion: "success" | "failure" | "neutral" | "cancelled";
     title: string;
     summary: string;
   }

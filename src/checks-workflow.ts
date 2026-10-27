@@ -5,12 +5,22 @@ import { getRepoConfig } from "./repos";
 import {
   completeCheckRun,
   getOrCreateCheckRun,
+  updateCheckRunStatus,
   fetchPrBody,
   getInstallationToken,
   type CheckTarget,
 } from "./checks";
 
 const MINUTE = 60 * 1000;
+
+// Queued admission polling when the checks pool is saturated: fast early
+// retries settle the common case (a slot frees within seconds), the 60s
+// cap keeps a deep queue cheap. 45 attempts of 5s→60s capped exponential
+// tops out near a ~40min wait — past that the check fails honestly
+// instead of sitting "queued" forever.
+const QUEUE_ADMIT_ATTEMPTS = 45;
+const QUEUE_ADMIT_MIN_DELAY_MS = 5_000;
+const QUEUE_ADMIT_MAX_DELAY_MS = 60_000;
 
 export interface ChecksParams extends CheckTarget {
   /** Optional subset of checks to run — defaults to all configured. */
@@ -27,7 +37,7 @@ interface CheckRunOut {
 
 export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
   override async run(event: WorkflowEvent<ChecksParams>, step: WorkflowStep) {
-    const { repo, sha, prNumber } = event.payload;
+    const { repo, sha, prNumber, headRef } = event.payload;
     const config = getRepoConfig(repo.split("/")[1] ?? repo);
     const token = this.env.GITHUB_APP_ID && this.env.GITHUB_APP_PRIVATE_KEY
       ? await getInstallationToken(
@@ -68,17 +78,26 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       return ids;
     });
 
-    const failAll = async (title: string, summary: string) => {
-      await Promise.all(
-        checks.map((c) =>
-          completeCheckRun(token, repo, runIds[c.name]!, {
-            conclusion: "failure",
-            title,
-            summary,
-          }).catch(() => {})
+    // Merge-queue refs are per-group and immutable — superseding only
+    // makes sense on real branch refs (pull_request / check_suite).
+    const queueKey =
+      headRef && !headRef.includes("gh-readonly-queue/") ? headRef : null;
+
+    // Newest-wins claim on (repo, ref): a check run that ends up queued
+    // for a pool slot reads this back and cancels itself when a newer
+    // push took the branch — a stale run that kept polling would burn a
+    // container on a dead commit.
+    if (queueKey) {
+      await withScheduler("dedupe-checkclaim", (stub) =>
+        stub.claimCheck(
+          repo,
+          queueKey,
+          event.instanceId,
+          sha,
+          event.timestamp.getTime()
         )
       );
-    };
+    }
 
     try {
       // PR body for checks that honor the "No tests:" escape hatch.
@@ -99,89 +118,181 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         ok?: boolean;
         output?: string;
         error?: string;
+        /** Cancelled while queued — a newer sha claimed the ref. */
+        superseded?: boolean;
       }
-      const results: CheckResult[] = await Promise.all(
-        checks.map((check): Promise<CheckResult> =>
-          step
+
+      const runOneCheck = async (
+        check: (typeof checks)[number]
+      ): Promise<CheckResult> => {
+        const checkSandboxId = `${sandboxId}-${check.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
+        const attemptAdmit = async (): Promise<
+          | { state: "admitted" }
+          | { state: "superseded" }
+          | { state: "denied"; reason: string }
+        > => {
+          if (queueKey) {
+            const claim = await scheduler().getCheckClaim(repo, queueKey);
+            if (claim && claim.sha !== sha) return { state: "superseded" };
+          }
+          const admission = await scheduler().admit({
+            pool: "CHECKS",
+            name: checkSandboxId,
+            instanceId: event.instanceId,
+          });
+          return admission.ok
+            ? { state: "admitted" }
+            : { state: "denied", reason: admission.reason };
+        };
+
+        const first = await step.do(
+          `admit-${check.name}`,
+          {
+            retries: { limit: 5, delay: 5_000, backoff: "linear" },
+            timeout: 60_000,
+          },
+          attemptAdmit
+        );
+        if (first.state === "superseded") {
+          return { name: check.name, superseded: true };
+        }
+        if (first.state === "denied") {
+          // The pool is saturated — keep the check run "queued" and poll
+          // for a slot inside the workflow instead of failing the check
+          // (an author used to have to push an empty commit to retrigger).
+          await step.do(`queued-${check.name}`, () =>
+            updateCheckRunStatus(token, repo, runIds[check.name]!, "queued", {
+              title: `${check.name} queued`,
+              summary: `${first.reason} — waiting for a checks slot to free up.`,
+            }).catch(() => {})
+          );
+          const waited = await step
             .do(
-              `run-${check.name}`,
+              `admit-wait-${check.name}`,
               {
-                retries: { limit: 2, delay: 15_000 },
-                timeout: 80 * MINUTE,
+                retries: {
+                  limit: QUEUE_ADMIT_ATTEMPTS,
+                  delay: ({ ctx }) =>
+                    Math.min(
+                      QUEUE_ADMIT_MAX_DELAY_MS,
+                      QUEUE_ADMIT_MIN_DELAY_MS * 2 ** (ctx.attempt - 1)
+                    ),
+                },
+                timeout: 60 * MINUTE,
               },
-              async () => {
-                const checkSandboxId = `${sandboxId}-${check.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
-                const admission = await scheduler().admit({
-                  pool: "CHECKS",
-                  name: checkSandboxId,
-                  instanceId: event.instanceId,
-                });
-                if (!admission.ok) {
-                  return {
-                    name: check.name,
-                    error: "CI capacity — checks pool at capacity",
-                  };
-                }
-                const sandbox = this.env.CHECKS_SANDBOX.getByName(checkSandboxId);
-                try {
-                  // Flat 75min bound on install+check; check.timeoutMs bounds
-                  // the check command itself inside the script — a cold
-                  // install can't eat its budget. The store cache (a
-                  // DirectoryBackup on the R2 binding) keys off the lockfile
-                  // hash — the DO computes it after checkout.
-                  const run = await sandbox.runCheck({
-                    checkoutScript: buildCheckoutScript(event.payload),
-                    script: buildRunScript(config, [check]),
-                    env: {
-                      GITHUB_TOKEN: token,
-                      NPM_TOKEN: this.env.NPM_TOKEN ?? "",
-                      PR_BODY: prBody,
-                      CI: "true",
-                    },
-                    timeoutSec: 75 * 60,
-                    cacheRepo: config.checksInstallCommand
-                      ? repo.split("/")[1]
-                      : undefined,
-                  });
-                  const parsed = parseRunOutput(run);
-                  if (parsed.checkoutRc !== 0) {
-                    return {
-                      name: check.name,
-                      error: `Checkout failed: ${parsed.output.slice(-2000)}`,
-                    };
-                  }
-                  if (parsed.installRc !== 0) {
-                    return {
-                      name: check.name,
-                      error: `Install failed: ${parsed.output.slice(-2000)}`,
-                    };
-                  }
-                  const out = parsed.checks[check.name];
-                  return {
-                    name: check.name,
-                    ok: out?.rc === 0,
-                    output: (out?.output ?? "(no output)").slice(-4000),
-                  };
-                } finally {
-                  // Destroy while the reservation is still held — a wedged
-                  // teardown keeps the slot on the ledger for the sweep to
-                  // retry, instead of leaking an unaccounted container.
-                  await sandbox.destroy().catch(() => {});
-                  await scheduler()
-                    .release(checkSandboxId)
-                    .catch(() => {});
-                }
+              async (): Promise<"admitted" | "superseded"> => {
+                const outcome = await attemptAdmit();
+                if (outcome.state === "denied")
+                  throw new Error(outcome.reason);
+                return outcome.state;
               }
             )
-            .catch((err: unknown) => ({
+            // Retries exhausted (still saturated) or a persistent
+            // scheduler failure — the queue bound ends in an honest
+            // failure, not a check stuck queued forever.
+            .catch((): "capacity" => "capacity");
+          if (waited === "superseded") {
+            return { name: check.name, superseded: true };
+          }
+          if (waited === "capacity") {
+            return {
               name: check.name,
-              error: `Check run error: ${String(err)}`,
-            }))
+              error:
+                "CI capacity — waited ~40m for a checks slot and the " +
+                `pool never freed (${first.reason})`,
+            };
+          }
+          await step.do(`start-${check.name}`, () =>
+            updateCheckRunStatus(
+              token,
+              repo,
+              runIds[check.name]!,
+              "in_progress"
+            ).catch(() => {})
+          );
+        }
+
+        return step.do(
+          `run-${check.name}`,
+          {
+            retries: { limit: 2, delay: 15_000 },
+            timeout: 80 * MINUTE,
+          },
+          async (): Promise<CheckResult> => {
+            const sandbox = this.env.CHECKS_SANDBOX.getByName(checkSandboxId);
+            try {
+              // Flat 75min bound on install+check; check.timeoutMs bounds
+              // the check command itself inside the script — a cold
+              // install can't eat its budget. The store cache (a
+              // DirectoryBackup on the R2 binding) keys off the lockfile
+              // hash — the DO computes it after checkout.
+              const run = await sandbox.runCheck({
+                checkoutScript: buildCheckoutScript(event.payload),
+                script: buildRunScript(config, [check]),
+                env: {
+                  GITHUB_TOKEN: token,
+                  NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+                  PR_BODY: prBody,
+                  CI: "true",
+                },
+                timeoutSec: 75 * 60,
+                cacheRepo: config.checksInstallCommand
+                  ? repo.split("/")[1]
+                  : undefined,
+              });
+              const parsed = parseRunOutput(run);
+              if (parsed.checkoutRc !== 0) {
+                return {
+                  name: check.name,
+                  error: `Checkout failed: ${parsed.output.slice(-2000)}`,
+                };
+              }
+              if (parsed.installRc !== 0) {
+                return {
+                  name: check.name,
+                  error: `Install failed: ${parsed.output.slice(-2000)}`,
+                };
+              }
+              const out = parsed.checks[check.name];
+              return {
+                name: check.name,
+                ok: out?.rc === 0,
+                output: (out?.output ?? "(no output)").slice(-4000),
+              };
+            } finally {
+              // Destroy while the reservation is still held — a wedged
+              // teardown keeps the slot on the ledger for the sweep to
+              // retry, instead of leaking an unaccounted container.
+              await sandbox.destroy().catch(() => {});
+              await scheduler()
+                .release(checkSandboxId)
+                .catch(() => {});
+            }
+          }
+        );
+      };
+
+      const results: CheckResult[] = await Promise.all(
+        checks.map((check): Promise<CheckResult> =>
+          runOneCheck(check).catch((err: unknown) => ({
+            name: check.name,
+            error: `Check run error: ${String(err)}`,
+          }))
         )
       );
 
       for (const r of results) {
         await step.do(`report-${r.name}`, () => {
+          if (r.superseded) {
+            return completeCheckRun(token, repo, runIds[r.name]!, {
+              conclusion: "cancelled",
+              title: `${r.name} superseded`,
+              summary:
+                "A newer commit on this ref superseded this run while " +
+                "it was queued — running it would have tested a stale " +
+                "checkout.",
+            });
+          }
           const errored = r.error !== undefined;
           return completeCheckRun(token, repo, runIds[r.name]!, {
             conclusion: errored || !r.ok ? "failure" : "success",
