@@ -216,6 +216,7 @@ export function buildCheckoutScript(payload: {
   headRef?: string;
   prNumber?: number;
   baseSha?: string;
+  baseRef?: string;
 }): string {
   // Diff-based checks (diff-coverage) measure against refs/ci/base, pinned
   // here to the true diff base: the merge's base parent for merge commits,
@@ -254,7 +255,18 @@ export function buildCheckoutScript(payload: {
       `  echo "checkout: pull/${payload.prNumber}/head (merge ref stale or absent)"`,
       `  git fetch -q --depth 50 origin pull/${payload.prNumber}/head && git checkout -q ${payload.sha} || rc=$?`,
       `fi`,
-      pinBase("HEAD^1")
+      // Base = merge-base against the PR's target branch when we have it.
+      // HEAD^1 is wrong for anything but a single-commit tip: a branch that
+      // merged main mid-flight (or a long-lived PR) re-scans all of that
+      // history under gitleaks/diff-coverage.
+      ...(payload.baseRef
+        ? [
+            `git fetch -q --depth 50 origin ${shellQuote(payload.baseRef)} 2>/dev/null || true`,
+            pinBase(
+              `$(git merge-base HEAD FETCH_HEAD 2>/dev/null || echo HEAD^1)`
+            ),
+          ]
+        : [pinBase("HEAD^1")])
     );
   } else {
     const fetchRef = payload.headRef ?? payload.sha;

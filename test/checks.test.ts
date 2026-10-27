@@ -46,13 +46,18 @@ test("parseCheckEvent: pull_request synchronize → head sha", () => {
   const target = parseCheckEvent("pull_request", {
     action: "synchronize",
     repository: { full_name: "VortexNYC/pile" },
-    pull_request: { number: 42, head: { sha: "abc123", ref: "feat-x" } },
+    pull_request: {
+      number: 42,
+      head: { sha: "abc123", ref: "feat-x" },
+      base: { ref: "main" },
+    },
   });
   assert.deepEqual(target, {
     repo: "VortexNYC/pile",
     sha: "abc123",
     prNumber: 42,
     headRef: "feat-x",
+    baseRef: "main",
   });
 });
 
@@ -159,6 +164,24 @@ test("buildCheckoutScript prefers a fresh PR merge ref, head as fallback", () =>
   // Stale/absent merge ref falls back to the head fetch.
   assert.match(script, /git fetch -q --depth 50 origin pull\/42\/head && git checkout -q abc123/);
   assert.match(script, /git update-ref refs\/ci\/base HEAD\^1/);
+});
+
+test("buildCheckoutScript pins ci/base to the PR merge-base when baseRef is known", () => {
+  const script = buildCheckoutScript({
+    repo: "VortexNYC/pile",
+    sha: "abc123",
+    prNumber: 42,
+    baseRef: "main",
+  });
+  // Fetches the target branch and pins the base to the fork point — a
+  // branch that merged main mid-flight (or a long-lived PR) must not
+  // re-scan main's history under gitleaks/diff-coverage.
+  assert.match(script, /git fetch -q --depth 50 origin 'main'/);
+  assert.match(
+    script,
+    /git update-ref refs\/ci\/base \$\(git merge-base HEAD FETCH_HEAD/
+  );
+  assert.match(script, /echo HEAD\^1\)/);
 });
 
 test("buildCheckoutScript fetches the queue ref for merge groups", () => {

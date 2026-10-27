@@ -9,6 +9,8 @@ export interface CheckTarget {
   headRef?: string;
   /** merge_group.base_sha — the base tip the group's diff is measured against. */
   baseSha?: string;
+  /** pull_request.base.ref — the PR's target branch (e.g. "main"). */
+  baseRef?: string;
   /** PR body/title edit — only checks that consume the PR body should re-run. */
   edited?: boolean;
   /** check_run.rerequested — re-run only this check name, not the whole set. */
@@ -82,6 +84,10 @@ export function parseCheckEvent(
       sha,
       prNumber: typeof pr.number === "number" ? pr.number : undefined,
       headRef: str(pr.head.ref),
+      baseRef:
+        isObj(pr.base) && typeof pr.base.ref === "string"
+          ? pr.base.ref
+          : undefined,
       ...(action === "edited" ? { edited: true } : {}),
     };
   }
