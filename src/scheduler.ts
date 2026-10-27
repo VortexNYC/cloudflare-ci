@@ -252,30 +252,73 @@ export class CiScheduler extends DurableObject<Bindings> {
   ): Promise<void> {
     const existing = await this.getClaim(repo, branch);
     if (existing?.instanceId === instanceId) {
+      const now = Date.now();
       await this.ctx.storage.put(`claim/${repo}/${branch}`, {
         ...existing,
         status: "completed",
-        at: Date.now(),
+        at: now,
       } satisfies RunClaim);
+      if (repo === "canary" && branch === "canary") {
+        await this.ctx.storage.put("canary/lastCompletedAt", now);
+      }
+    }
+  }
+
+  private async sendAlertEmail(subject: string, text: string): Promise<void> {
+    const emailBinding = this.env.EMAIL;
+    const fromHeader = this.env.ALERT_EMAIL_FROM ?? "Cloudflare CI <noreply@veil.nyc>";
+    const to = this.env.ALERT_EMAIL_TO ?? "shlomo@vortex.nyc";
+    if (!emailBinding || !to) return;
+    try {
+      const match = fromHeader.match(/<([^>]+)>/);
+      const fromAddr = match ? match[1] : fromHeader;
+      const boundary = `cfci-${crypto.randomUUID()}`;
+      const raw = [
+        `From: ${fromHeader}`,
+        `To: ${to}`,
+        `Subject: ${subject}`,
+        "MIME-Version: 1.0",
+        `Content-Type: multipart/alternative; boundary="${boundary}"`,
+        "",
+        `--${boundary}`,
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        text,
+        `--${boundary}--`,
+      ].join("\r\n");
+      const mod = (await import("cloudflare:email")) as {
+        EmailMessage: new (from: string, to: string, raw: string) => unknown;
+      };
+      await emailBinding.send(new mod.EmailMessage(fromAddr, to, raw));
+    } catch {
+      // best-effort — never block the scheduler on email delivery
     }
   }
 
   /**
    * Failures file themselves — a dead/errored claim posts a Pile issue in
-   * the workspace so the team sees it where they work, not in wrangler
-   * output nobody reads. Optional: no PILE_API_KEY → silent skip.
+   * the workspace and sends a native Cloudflare email alert so the team sees
+   * it immediately.
    */
   private async reportClaimFailure(
     repoBranch: string,
     claim: RunClaim,
     reason: string
   ): Promise<void> {
+    const [repo, ...rest] = repoBranch.split("/");
+    const branch = rest.join("/");
+    const title = `CI failed: ${repo}/${branch}`;
+    const description = [
+      `cloudflare-ci run ${claim.instanceId} ${reason}.`,
+      `- sha: ${claim.sha ?? "unknown"}`,
+      `- branch: ${branch}`,
+      `- refires: ${claim.refires ?? 0}`,
+    ].join("\n");
+    await this.sendAlertEmail(`[cloudflare-ci] ${title}`, description);
     const baseUrl = this.env.PILE_BASE_URL as string | undefined;
     const apiKey = this.env.PILE_API_KEY as string | undefined;
     const workspace = this.env.PILE_WORKSPACE as string | undefined;
     if (!baseUrl || !apiKey || !workspace) return;
-    const [repo, ...rest] = repoBranch.split("/");
-    const branch = rest.join("/");
     try {
       await fetch(`${baseUrl}/workspaces/${workspace}/issues`, {
         method: "POST",
@@ -284,19 +327,48 @@ export class CiScheduler extends DurableObject<Bindings> {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          title: `CI failed: ${repo}/${branch}`,
-          description: [
-            `cloudflare-ci run ${claim.instanceId} ${reason}.`,
-            `- sha: ${claim.sha ?? "unknown"}`,
-            `- branch: ${branch}`,
-            `- refires: ${claim.refires ?? 0}`,
-          ].join("\n"),
+          title,
+          description,
           status: "triage",
           priority: "high",
         }),
       });
     } catch {
       // reporting is best-effort — never block the ledger on Pile
+    }
+  }
+
+  private async checkCanarySilence(): Promise<void> {
+    const lastCompleted = await this.ctx.storage.get<number>("canary/lastCompletedAt");
+    if (!lastCompleted) return;
+    const ageMs = Date.now() - lastCompleted;
+    if (ageMs <= 90 * 60_000) return;
+    const lastAlert = (await this.ctx.storage.get<number>("alert/canary-silence")) ?? 0;
+    if (Date.now() - lastAlert < 6 * 60 * 60_000) return;
+    await this.ctx.storage.put("alert/canary-silence", Date.now());
+    const mins = Math.round(ageMs / 60_000);
+    const title = `CI canary silent (${mins}m since last completion)`;
+    const text = `cloudflare-ci canary/canary has not completed in ${mins} minutes (threshold: 90m).`;
+    await this.sendAlertEmail(`[cloudflare-ci] ${title}`, text);
+    const baseUrl = this.env.PILE_BASE_URL as string | undefined;
+    const apiKey = this.env.PILE_API_KEY as string | undefined;
+    const workspace = this.env.PILE_WORKSPACE as string | undefined;
+    if (baseUrl && apiKey && workspace) {
+      try {
+        await fetch(`${baseUrl}/workspaces/${workspace}/issues`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title,
+            description: text,
+            status: "triage",
+            priority: "high",
+          }),
+        });
+      } catch {}
     }
   }
 
@@ -497,6 +569,7 @@ export class CiScheduler extends DurableObject<Bindings> {
     const reaped = await this.reapStale();
     const deadReaped = await this.reapDeadRuns();
     const { refired } = await this.reconcileClaims();
+    await this.checkCanarySilence();
     return {
       reaped,
       deadReaped,
