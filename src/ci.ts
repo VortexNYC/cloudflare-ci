@@ -339,10 +339,15 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     // it — the prod rollout only starts on a green staging verify. Previews
     // already target this env, so the deploy shape is the preview shape.
     if (config.previewCommand && config.stagingVerifyCommand) {
+      // stagingE2eCommand rides this step deliberately: it's the only
+      // post-staging stage with the restored workspace + relinked
+      // node_modules (staging-verify is a bare lite-pool checkout). Its
+      // failure fails the step before prod traffic moves.
       const stagingCommand =
         `${npmrcCommand} && ` +
         `${relinkCommand} && ` +
-        `${config.previewCommand}`;
+        `${config.previewCommand}` +
+        (config.stagingE2eCommand ? ` && ${config.stagingE2eCommand}` : "");
       await buildResult.runner({
         name: "staging",
         command: bound(stagingCommand, DEPLOY_COMMAND_TIMEOUT_MS),

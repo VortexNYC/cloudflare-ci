@@ -49,6 +49,13 @@ const repoConfigSchema = z.object({
   stagingVerifyCommand: z.string().optional(),
   /** Settle time between staging deploy and its verify probe. */
   stagingBakeSec: z.number().default(30),
+  // Extended staging bake: runs inside the staging step (restored
+  // workspace, relinked node_modules, NPM_TOKEN, 25-min bound) right
+  // after previewCommand ships the staging env. staging-verify can't
+  // host it — that's a fresh lite-pool checkout with a 5-minute curl
+  // budget and no install. A non-zero exit fails the staging step
+  // before the prod rollout starts.
+  stagingE2eCommand: z.string().optional(),
   // VTX-586: named worker secrets injected into the deploy step env —
   // same mechanism as buildSecrets/verifySecrets, for deploy-time creds.
   deploySecrets: z.array(z.string()).default([]),
@@ -239,6 +246,19 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     stagingVerifyCommand:
       "curl -fsS --max-time 15 https://staging.pile.nyc/health",
     stagingBakeSec: 45,
+    // apps/web Playwright bake against the just-deployed staging worker
+    // (PLAYWRIGHT_BASE_URL skips the local dev server — specs hit
+    // staging.pile.nyc directly). --with-deps apt-installs chromium's OS
+    // libs at runtime — the sandbox runs as root, so no image change is
+    // needed; bake the dep list into ./Dockerfile if it ever flakes.
+    // WARNING: env.staging shares prod D1/DO bindings (see previewCommand)
+    // — these specs sign up real users whose rows land in the production
+    // database. Acceptable today because staging is already prod-adjacent,
+    // but the suite must stay additive-only (sign up, then touch only its
+    // own workspace) until staging gets a dedicated data plane.
+    stagingE2eCommand:
+      "pnpm -C apps/web exec playwright install --with-deps chromium && " +
+      "PLAYWRIGHT_BASE_URL=https://staging.pile.nyc pnpm -C apps/web run test:e2e",
     // Version URLs aren't generated for DO workers, so previews are a real
     // second worker: staging.pile.nyc. env.staging shares prod data
     // bindings but has no queue consumer, no cron, no EMAIL — last branch
@@ -271,6 +291,19 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
         env: { DIFF_COVERAGE_BASE: "refs/ci/base" },
         timeoutMs: 10 * 60 * 1000,
         usesPrBody: true,
+      },
+      {
+        // packages/capture's Playwright suite is self-contained — it
+        // vite-builds the IIFE and stands up a mock ingest server, so no
+        // stack is needed (~1s of tests). --with-deps apt-installs
+        // chromium's OS libs each run; the checks container runs as root
+        // so no Dockerfile.checks change is required. If apt-at-runtime
+        // ever flakes, bake the dep list into Dockerfile.checks instead.
+        name: "e2e-capture",
+        command:
+          "pnpm -C packages/capture exec playwright install --with-deps chromium && " +
+          "pnpm run test:e2e:capture",
+        timeoutMs: 10 * 60 * 1000,
       },
       // gitleaks rides the platform baseline — .gitleaks.toml is
       // auto-detected by the baseline command.
