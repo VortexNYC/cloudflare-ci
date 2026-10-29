@@ -236,9 +236,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                   CI: "true",
                 },
                 timeoutSec: 75 * 60,
-                cacheRepo: config.checksInstallCommand
-                  ? repo.split("/")[1]
-                  : undefined,
+                cacheRepo:
+                  config.checksInstallCommand && check.needsInstall !== false
+                    ? repo.split("/")[1]
+                    : undefined,
               });
               const parsed = parseRunOutput(run);
               if (parsed.checkoutRc !== 0) {
@@ -397,10 +398,11 @@ export function buildRunScript(
     command: string;
     env?: Record<string, string>;
     timeoutMs?: number;
+    needsInstall?: boolean;
   }>
 ): string {
   const lines: string[] = ["set +e"];
-  if (config.checksInstallCommand) {
+  if (config.checksInstallCommand && checks.some((c) => c.needsInstall !== false)) {
     lines.push(
       // Install into the (possibly restored) store at /tmp/.pnpm-store.
       // The sentinel tells ChecksSandbox the store is worth backing up —

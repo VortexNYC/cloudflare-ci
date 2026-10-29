@@ -73,6 +73,10 @@ const repoConfigSchema = z.object({
         // Check consumes PR_BODY (e.g. the "No tests:" escape hatch) —
         // pull_request.edited events re-run only these, not the whole set.
         usesPrBody: z.boolean().default(false),
+        // False for checks that run image binaries or plain shell (gitleaks,
+        // prc) — skips checksInstallCommand so the sandbox goes straight to
+        // the check instead of a full monorepo install (VTX-809).
+        needsInstall: z.boolean().default(true),
       })
     )
     .default([]),
@@ -329,7 +333,9 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       "(cd apps/ops-relay && pnpm exec vp exec wrangler deploy) && " +
       "(cd apps/anydoc-worker && pnpm exec vp exec wrangler deploy -e production) && " +
       "(cd packages/cde-worker && pnpm exec vp exec wrangler deploy) && " +
-      "(cd packages/ci-worker && pnpm exec vp exec wrangler deploy)",
+      // ci-worker declares a container image; the sandbox has no Docker CLI —
+      // upload the worker without rolling its containers (they deploy out of band).
+      "(cd packages/ci-worker && pnpm exec vp exec wrangler deploy --containers-rollout=none)",
     previewCommand:
       '(cd packages/worker && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
       '(cd apps/dashboard && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
@@ -449,6 +455,7 @@ const baselineChecks: CheckEntry[] = [
     command:
       '[ -f production-readiness/prc.sh ] || { echo "prc: no script — skipped"; exit 0; }; bash production-readiness/prc.sh',
     timeoutMs: 15 * 60 * 1000,
+    needsInstall: false,
   },
   {
     name: "gitleaks",
@@ -456,6 +463,7 @@ const baselineChecks: CheckEntry[] = [
       'CFG=""; [ -f .gitleaks.toml ] && CFG="--config .gitleaks.toml"; ' +
       'gitleaks git $CFG --redact --log-opts "refs/ci/base..HEAD" --verbose .',
     timeoutMs: 5 * 60 * 1000,
+    needsInstall: false,
   },
 ];
 
