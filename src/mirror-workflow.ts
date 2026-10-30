@@ -9,16 +9,23 @@ import {
   type WorkflowStep,
 } from "cloudflare:workers";
 
+import {
+  completeCheckRun,
+  getInstallationToken,
+  getOrCreateCheckRun,
+} from "./checks";
 import type { Bindings } from "./env";
 import {
   AUX_ADMIT_ATTEMPTS,
   auxAdmitRetryDelayMs,
 } from "./pool-admit";
+import { capturePostHog } from "./posthog";
 
 type MirrorParams = { repo: string; branch: string; sha: string };
 type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
 
 const MINUTE = 60 * 1000;
+const MIRROR_CHECK_NAME = "Push to Cloudflare Artifacts";
 
 const ARTIFACTS_NS = "vortex";
 
@@ -52,6 +59,24 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
   async run(event: WorkflowEvent<MirrorParams>, step: WorkflowStep) {
     const { repo, branch, sha } = event.payload;
     const repoName = repo.split("/")[1] ?? repo;
+    const githubToken = await step.do("github-token", async () => {
+      if (this.env.GITHUB_APP_ID && this.env.GITHUB_APP_PRIVATE_KEY) {
+        return getInstallationToken(
+          this.env.GITHUB_APP_ID,
+          this.env.GITHUB_APP_PRIVATE_KEY,
+          repo
+        ).catch(() => this.env.CHECKS_GITHUB_TOKEN ?? "");
+      }
+      return this.env.CHECKS_GITHUB_TOKEN ?? "";
+    });
+    if (!githubToken) {
+      throw new Error("mirror: no GitHub token — cannot post required check run");
+    }
+
+    const checkRunId = await step.do("open-mirror-check", () =>
+      getOrCreateCheckRun(githubToken, repo, sha, MIRROR_CHECK_NAME)
+    );
+
     const scheduler = () =>
       this.env.CI_SCHEDULER.get(this.env.CI_SCHEDULER.idFromName("global"));
     const withScheduler = <T extends Rpc.Serializable<T>>(
@@ -79,40 +104,45 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
         : { ok: false, reason: "reason" in res ? res.reason : "AUX at capacity" };
     };
 
-    const first = await withScheduler("admit", () => attemptAdmit());
-    if (!first.ok) {
-      await step.do(
-        "admit-wait",
-        {
-          retries: {
-            limit: AUX_ADMIT_ATTEMPTS,
-            delay: ({ ctx }) => auxAdmitRetryDelayMs(ctx.attempt),
-          },
-          timeout: 35 * MINUTE,
-        },
-        async () => {
-          const outcome = await attemptAdmit();
-          if (!outcome.ok) throw new Error(outcome.reason);
-        }
-      );
-    }
     try {
-      const token = await step.do("resolve artifacts token", () =>
+      const first = await withScheduler("admit", () => attemptAdmit());
+      if (!first.ok) {
+        await capturePostHog(this.env, "ci.mirror.pool_wait_started", {
+          repo,
+          branch,
+          sha,
+          reason: first.reason,
+        });
+        await step.do(
+          "admit-wait",
+          {
+            retries: {
+              limit: AUX_ADMIT_ATTEMPTS,
+              delay: ({ ctx }) => auxAdmitRetryDelayMs(ctx.attempt),
+            },
+            timeout: 35 * MINUTE,
+          },
+          async () => {
+            const outcome = await attemptAdmit();
+            if (!outcome.ok) throw new Error(outcome.reason);
+          }
+        );
+        await capturePostHog(this.env, "ci.mirror.pool_wait_done", {
+          repo,
+          branch,
+          sha,
+        });
+      }
+
+      const artifactsToken = await step.do("resolve artifacts token", () =>
         resolveArtifactsToken(this.env, repo)
       );
       await step.do("push to artifacts", async () => {
         const sandbox = this.env.CHECKS_SANDBOX.getByName(sandboxId);
-        // Tokens ride the container env (GITHUB_TOKEN / ARTIFACTS_TOKEN) —
-        // never interpolated into argv, where they'd land in process listings.
         const clone = [
           "set -euo pipefail",
           "git init -q --bare /workspace && cd /workspace",
-          // Retries re-enter the same sandbox — the remote may already exist.
           'git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" 2>/dev/null || git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
-          // Fetch the event's SHA, not the branch tip — two overlapping
-          // pushes would otherwise let an older workflow mirror a stale tip
-          // over the newer one. GitHub permits fetching reachable SHAs.
-          // No depth bound — a shallow FETCH_HEAD can't be pushed.
           'git fetch -q origin "$SHA"',
         ].join(" && ");
         const push = [
@@ -123,8 +153,8 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
           checkoutScript: clone,
           script: push,
           env: {
-            GITHUB_TOKEN: this.env.CHECKS_GITHUB_TOKEN ?? "",
-            ARTIFACTS_TOKEN: token,
+            GITHUB_TOKEN: githubToken,
+            ARTIFACTS_TOKEN: artifactsToken,
             REPO: repo,
             BRANCH: branch,
             SHA: sha,
@@ -139,6 +169,26 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
           );
         }
       });
+
+      await step.do("complete-mirror-check", () =>
+        completeCheckRun(githubToken, repo, checkRunId, {
+          conclusion: "success",
+          title: "Mirrored to Cloudflare Artifacts",
+          summary: `Branch ${branch} @ ${sha.slice(0, 7)} force-pushed to Artifacts.`,
+        })
+      );
+    } catch (err: unknown) {
+      const summary = String(err).slice(-4000);
+      await step
+        .do("fail-mirror-check", () =>
+          completeCheckRun(githubToken, repo, checkRunId, {
+            conclusion: "failure",
+            title: "Artifacts mirror failed",
+            summary,
+          })
+        )
+        .catch(() => {});
+      throw err;
     } finally {
       await withScheduler("release", (stub) => stub.release(sandboxId)).catch(
         () => {}

@@ -114,6 +114,13 @@ against cloudflare's repo when there's bandwidth.
 - `POST /admin/sandbox/sweep` — reap reservations >60min; returns the live
   ledger. Runs unattended hourly via cron (`17 * * * *`).
 - All admin routes: `Authorization: Bearer $ADMIN_TOKEN`, timing-safe.
+- **`ARTIFACTS_ACCOUNT_ID` secret** must match `CLOUDFLARE_ACCOUNT_ID`
+  (`953346ce…`). A stale Vortex-old value mirrors into a dead namespace while
+  GitHub pushes look fine — `validateEnv` refuses to serve on mismatch.
+- **Busy CI day:** `POST /admin/sandbox/sweep` → read `reservations` (CHECKS
+  at 10/10 = saturated). Tail logs for `ci.checks.pool_wait_started` /
+  `ci.mirror.pool_wait_started`. Stuck run: terminate workflow instance, sweep
+  again.
 - Deploys reset live sandbox DO isolates — `pnpm deploy` refuses while a
   run is in flight. `DRAIN=1 pnpm deploy` terminates in-flight runs
   deliberately and lets the ledger refire dead claims (VTX-627) — the

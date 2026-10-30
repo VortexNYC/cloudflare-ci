@@ -415,12 +415,25 @@ async function handleDrill(request: Request, env: Bindings): Promise<Response> {
 // ADMIN_TOKEN otherwise 401s silently forever and a missing CF_TOKEN only
 // surfaces mid-sweep.
 let envValidated = false;
+const VORTEX_OLD_ACCOUNT_ID = "31bfc2c14a28e0a39e8b9e3c556a18be";
+
 function validateEnv(env: Bindings): void {
   if (envValidated) return;
   const bad: string[] = [];
   if (!env.ADMIN_TOKEN || String(env.ADMIN_TOKEN).length < 32)
     bad.push("ADMIN_TOKEN (>=32 chars)");
   if (!env.CF_TOKEN) bad.push("CF_TOKEN");
+  if (!env.ARTIFACTS_ACCOUNT_ID) bad.push("ARTIFACTS_ACCOUNT_ID");
+  else if (
+    env.CLOUDFLARE_ACCOUNT_ID &&
+    env.ARTIFACTS_ACCOUNT_ID !== env.CLOUDFLARE_ACCOUNT_ID
+  ) {
+    bad.push(
+      env.ARTIFACTS_ACCOUNT_ID === VORTEX_OLD_ACCOUNT_ID
+        ? "ARTIFACTS_ACCOUNT_ID still points at Vortex-old — set to CLOUDFLARE_ACCOUNT_ID (953346ce…)"
+        : "ARTIFACTS_ACCOUNT_ID must match CLOUDFLARE_ACCOUNT_ID"
+    );
+  }
   if (bad.length)
     throw new Error(`cloudflare-ci misconfigured — refusing to serve: ${bad.join(", ")}`);
   envValidated = true;

@@ -1,7 +1,7 @@
 import { env } from "node:process";
 
 const accountId =
-  env.CLOUDFLARE_ACCOUNT_ID ?? "31bfc2c14a28e0a39e8b9e3c556a18be";
+  env.CLOUDFLARE_ACCOUNT_ID ?? "953346ce1b4f27fa04a76d83aeccab28";
 const workflowName = "cloudflare-ci";
 
 function parseArgs(argv) {

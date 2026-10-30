@@ -2,6 +2,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import type { ChecksRunResult } from "./checks-sandbox";
 import type { Bindings } from "./env";
 import { getRepoConfig } from "./repos";
+import { capturePostHog } from "./posthog";
 import {
   completeCheckRun,
   getOrCreateCheckRun,
@@ -157,6 +158,12 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           return { name: check.name, superseded: true };
         }
         if (first.state === "denied") {
+          await capturePostHog(this.env, "ci.checks.pool_wait_started", {
+            repo,
+            sha,
+            check: check.name,
+            reason: first.reason,
+          });
           // The pool is saturated — keep the check run "queued" and poll
           // for a slot inside the workflow instead of failing the check
           // (an author used to have to push an empty commit to retrigger).
@@ -195,6 +202,11 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             return { name: check.name, superseded: true };
           }
           if (waited === "capacity") {
+            await capturePostHog(this.env, "ci.checks.pool_saturated", {
+              repo,
+              sha,
+              check: check.name,
+            });
             return {
               name: check.name,
               error:
@@ -202,6 +214,11 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 `pool never freed (${first.reason})`,
             };
           }
+          await capturePostHog(this.env, "ci.checks.pool_wait_done", {
+            repo,
+            sha,
+            check: check.name,
+          });
           await step.do(`start-${check.name}`, () =>
             updateCheckRunStatus(
               token,
