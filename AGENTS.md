@@ -16,9 +16,11 @@ change this repo or its entry in `src/repos.ts`.
   pre-push hooks in each repo. CI produces deployable artifacts and ships
   them; nothing else belongs in a billable container.
 - `CiScheduler` DO (`src/scheduler.ts`, binding `CI_SCHEDULER`) owns:
-  - **Admission ledger** — every sandbox spawn calls `admit()` first;
-    per-pool caps (`POOL_LIMITS`, must match `max_instances` in
-    wrangler.jsonc) deny oversubscription. Runner retries with backoff up
+ - **Admission ledger** — every sandbox spawn calls `admit()` first;
+ per-pool caps (`POOL_LIMITS`: `SANDBOX`/`LITE`/`HEAVY` match `max_instances` in
+ wrangler.jsonc; `CHECKS` and `AUX` are ledger-only caps on the 1.0 checks
+ containers — mirror/release/canary use `AUX`, PR checks use `CHECKS`) deny
+ oversubscription. Runner retries with backoff up
     to 10 min. Reservations older than 60 min are reaped (destroyed)
     inline on admit, by the hourly cron, and by `POST /admin/sandbox/sweep`.
   - **Run claims** — `claim(repo, branch, instanceId, sha)` is atomic
