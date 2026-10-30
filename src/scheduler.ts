@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { getSandbox } from "@cloudflare/sandbox";
 import type { CiParams, CloudflareArtifacts } from "@cloudflare/ci";
 import type { Bindings } from "./env";
-import { capturePostHog } from "./posthog";
+import { logCiEvent } from "./observability";
 
 export type PoolName =
   | "SANDBOX"
@@ -84,6 +84,21 @@ export type RunClaim = {
   /** Deterministic staleness — dead claims age out without an instance probe. */
   expiresAt?: number;
 };
+
+/** Tracks checks/mirror workflow instances for one bounded infra refire (same as main deploy). */
+export type AuxWorkflowClaim = {
+  kind: "checks" | "mirror";
+  instanceId: string;
+  sha: string;
+  repo: string;
+  branch?: string;
+  status: "running" | "completed" | "errored";
+  at: number;
+  refires?: number;
+  params: unknown;
+};
+
+const AUX_REFIRE_MAX = 1;
 
 type AdmitResult = { ok: true } | { ok: false; reason: string };
 
@@ -238,7 +253,7 @@ export class CiScheduler extends DurableObject<Bindings> {
         // Duplicate delivery of a run already in flight — same sha, different
         // instance. Idempotency at ingress (the Open-Inspect delivery:<id>
         // pattern): log it, don't race a second pipeline.
-        await capturePostHog(this.env, "ci.delivery.duplicate", {
+        await logCiEvent(this.env, "ci.delivery.duplicate", {
           repo,
           branch,
           sha,
@@ -303,6 +318,173 @@ export class CiScheduler extends DurableObject<Bindings> {
         `checkclaim/${repo}/${branch}`
       )) ?? null
     );
+  }
+
+  private auxWorkflowStorageKey(input: {
+    kind: "checks" | "mirror";
+    repo: string;
+    sha: string;
+    branch?: string;
+  }): string {
+    const repoKey = input.repo.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+    const shaKey = input.sha.slice(0, 10);
+    if (input.kind === "mirror" && input.branch) {
+      const branchKey = input.branch.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      return `wrefire/mirror/${repoKey}/${shaKey}/${branchKey}`;
+    }
+    return `wrefire/${input.kind}/${repoKey}/${shaKey}`;
+  }
+
+  /** Register a checks/mirror workflow for infra refire — not used for deploy claims. */
+  async trackAuxWorkflow(input: {
+    kind: "checks" | "mirror";
+    repo: string;
+    sha: string;
+    branch?: string;
+    instanceId: string;
+    params: unknown;
+  }): Promise<void> {
+    const key = this.auxWorkflowStorageKey(input);
+    await this.ctx.storage.put(key, {
+      kind: input.kind,
+      repo: input.repo,
+      sha: input.sha,
+      branch: input.branch,
+      instanceId: input.instanceId,
+      params: input.params,
+      status: "running",
+      at: Date.now(),
+      refires: 0,
+    } satisfies AuxWorkflowClaim);
+  }
+
+  /** Normal completion — workflow posted conclusions; do not refire on test failure. */
+  async completeAuxWorkflow(
+    kind: "checks" | "mirror",
+    repo: string,
+    sha: string,
+    instanceId: string,
+    branch?: string
+  ): Promise<void> {
+    const key = this.auxWorkflowStorageKey({ kind, repo, sha, branch });
+    const existing = await this.ctx.storage.get<AuxWorkflowClaim>(key);
+    if (existing?.instanceId !== instanceId) return;
+    await this.ctx.storage.put(key, {
+      ...existing,
+      status: "completed",
+      at: Date.now(),
+    });
+  }
+
+  private async auxWorkflowStatus(
+    claim: AuxWorkflowClaim
+  ): Promise<string | null> {
+    const wf =
+      claim.kind === "checks"
+        ? this.env.CHECKS_WORKFLOW
+        : this.env.MIRROR_WORKFLOW;
+    try {
+      const instance = await wf.get(claim.instanceId);
+      const status = await instance.status();
+      return typeof status === "string" ? status : (status.status ?? null);
+    } catch {
+      return null;
+    }
+  }
+
+  private refireWorkflowId(claim: AuxWorkflowClaim): string {
+    const repoKey = claim.repo.replace("/", "-").toLowerCase();
+    const shaKey = claim.sha.slice(0, 10);
+    const n = (claim.refires ?? 0) + 1;
+    if (claim.kind === "mirror" && claim.branch) {
+      const branchKey = claim.branch.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      return `mirror-${repoKey}-${branchKey}-${shaKey}-refire-${n}`.replace(
+        /[^a-z0-9-]/g,
+        "-"
+      );
+    }
+    const rerun =
+      claim.kind === "checks" &&
+      claim.params &&
+      typeof claim.params === "object" &&
+      "checkNames" in claim.params &&
+      Array.isArray((claim.params as { checkNames?: string[] }).checkNames) &&
+      (claim.params as { checkNames?: string[] }).checkNames?.length === 1
+        ? `-rerun-${(claim.params as { checkNames: string[] }).checkNames[0]}`
+        : "";
+    return `checks-${repoKey}-${shaKey}${rerun}-refire-${n}`
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-");
+  }
+
+  private async reconcileAuxWorkflows(): Promise<{ refired: string[] }> {
+    const refired: string[] = [];
+    const rows = await this.ctx.storage.list<AuxWorkflowClaim>({
+      prefix: "wrefire/",
+    });
+    for (const [key, claim] of rows) {
+      if (claim.status !== "running") continue;
+      const status = await this.auxWorkflowStatus(claim);
+      if (status === "complete") {
+        await this.ctx.storage.put(key, { ...claim, status: "completed" });
+        continue;
+      }
+      if (
+        status === "running" ||
+        status === "queued" ||
+        status === "paused"
+      ) {
+        continue;
+      }
+      if ((claim.refires ?? 0) >= AUX_REFIRE_MAX) {
+        await this.ctx.storage.put(key, { ...claim, status: "errored" });
+        await logCiEvent(this.env, `ci.${claim.kind}.refire_exhausted`, {
+          repo: claim.repo,
+          sha: claim.sha,
+          branch: claim.branch,
+          instanceId: claim.instanceId,
+        });
+        continue;
+      }
+      try {
+        const id = this.refireWorkflowId(claim);
+        const wf =
+          claim.kind === "checks"
+            ? this.env.CHECKS_WORKFLOW
+            : this.env.MIRROR_WORKFLOW;
+        const created = await wf.create({
+          id,
+          params: claim.params as never,
+        });
+        await this.ctx.storage.put(key, {
+          ...claim,
+          instanceId: created.id,
+          status: "running",
+          refires: (claim.refires ?? 0) + 1,
+          at: Date.now(),
+        });
+        refired.push(key);
+        await logCiEvent(this.env, `ci.${claim.kind}.refired`, {
+          repo: claim.repo,
+          sha: claim.sha,
+          branch: claim.branch,
+          newInstanceId: created.id,
+          refire: (claim.refires ?? 0) + 1,
+        });
+      } catch {
+        await this.ctx.storage.put(key, { ...claim, status: "errored" });
+      }
+    }
+    return { refired };
+  }
+
+  private async reapAuxWorkflowClaims(): Promise<void> {
+    const cutoff = Date.now() - 24 * 60 * 60_000;
+    for (const [key, claim] of await this.ctx.storage.list<AuxWorkflowClaim>({
+      prefix: "wrefire/",
+    })) {
+      if (claim.at < cutoff) await this.ctx.storage.delete(key);
+    }
   }
 
   // checkclaim/ rows are per repo+ref and never deleted — age out
@@ -558,7 +740,7 @@ export class CiScheduler extends DurableObject<Bindings> {
       // PostHog sees wedges as events, not just as silence — the step's own
       // timeout can't fire once the isolate's dead, so the sweep reports.
       const [repo, branch] = key.replace(/^claim\//, "").split("/");
-      await capturePostHog(this.env, "ci.run.wedged", {
+      await logCiEvent(this.env, "ci.run.wedged", {
         repo,
         branch,
         instanceId: claim.instanceId,
@@ -589,7 +771,7 @@ export class CiScheduler extends DurableObject<Bindings> {
         // refire them as real deploys and never file triage; PostHog
         // carries the proof the failure path ran.
         await this.ctx.storage.put(key, { ...claim, status: "errored" });
-        await capturePostHog(this.env, "ci.claim.failed", {
+        await logCiEvent(this.env, "ci.claim.failed", {
           repo: parts[0],
           branch,
           instanceId: claim.instanceId,
@@ -670,12 +852,14 @@ export class CiScheduler extends DurableObject<Bindings> {
     const reaped = await this.reapStale();
     const deadReaped = await this.reapDeadRuns();
     const { refired } = await this.reconcileClaims();
+    const aux = await this.reconcileAuxWorkflows();
     await this.checkCanarySilence();
     await this.reapCheckClaims();
+    await this.reapAuxWorkflowClaims();
     return {
       reaped,
       deadReaped,
-      refired,
+      refired: [...refired, ...aux.refired],
       reservations: await this.reservations(),
     };
   }

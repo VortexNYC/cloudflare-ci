@@ -68,6 +68,16 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         () => fn(scheduler())
       );
 
+    await withScheduler("track-aux-wf", (stub) =>
+      stub.trackAuxWorkflow({
+        kind: "checks",
+        repo,
+        sha,
+        instanceId: event.instanceId,
+        params: event.payload,
+      })
+    );
+
     const sandboxId = `checks-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${sha.slice(0, 10)}`;
     // Reuse existing runs on refire — a refired webhook must not mint a
     // duplicate context per check name.
@@ -538,6 +548,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           });
         });
       }
+
+      await withScheduler("complete-aux-wf", (stub) =>
+        stub.completeAuxWorkflow("checks", repo, sha, event.instanceId)
+      );
     } finally {
       if (useSerial) {
         await withScheduler("release-serial", (stub) =>

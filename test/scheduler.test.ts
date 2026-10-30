@@ -299,3 +299,89 @@ test("sweep ages out stale check claims", async () => {
   assert.equal(await scheduler.getCheckClaim("pile", "feat-old"), null);
   assert.equal((await scheduler.getCheckClaim("pile", "feat-new"))?.sha, "sha2");
 });
+
+test("errored checks aux workflow refires once then exhausts", async () => {
+  const { scheduler, storage } = makeScheduler();
+  let createCount = 0;
+  (scheduler as never as { env: object }).env = {
+    ...((scheduler as never as { env: Record<string, unknown> }).env),
+    CI_WORKFLOW: {
+      get: async () => ({ status: async () => "running" }),
+      create: async () => ({ id: "unused" }),
+    },
+    CHECKS_WORKFLOW: {
+      get: async (id: string) => ({
+        status: async () => (id === "dead-wf" ? "errored" : "running"),
+      }),
+      create: async () => {
+        createCount += 1;
+        return { id: `refired-checks-${createCount}` };
+      },
+    },
+    MIRROR_WORKFLOW: {
+      get: async () => ({ status: async () => "running" }),
+      create: async () => ({ id: "unused" }),
+    },
+  };
+  const key = "wrefire/checks/vortexnyc-pile/abc1234567";
+  await storage.put(key, {
+    kind: "checks",
+    repo: "VortexNYC/pile",
+    sha: "abc1234567890",
+    instanceId: "dead-wf",
+    status: "running",
+    at: Date.now(),
+    refires: 0,
+    params: { repo: "VortexNYC/pile", sha: "abc1234567890" },
+  });
+  const first = await scheduler.sweep();
+  assert.equal(createCount, 1);
+  assert.ok(first.refired.some((r) => r.startsWith("wrefire/")));
+  const row1 = await storage.get<{ instanceId: string; refires?: number }>(key);
+  assert.equal(row1?.instanceId, "refired-checks-1");
+  assert.equal(row1?.refires, 1);
+
+  (scheduler as never as { env: object }).env = {
+    ...((scheduler as never as { env: Record<string, unknown> }).env),
+    CHECKS_WORKFLOW: {
+      get: async () => ({ status: async () => "errored" }),
+      create: async () => ({ id: "should-not-run" }),
+    },
+  };
+  await scheduler.sweep();
+  const row2 = await storage.get<{ status: string }>(key);
+  assert.equal(row2?.status, "errored");
+});
+
+test("completeAuxWorkflow stops refire after normal checks finish", async () => {
+  const { scheduler, storage } = makeScheduler();
+  let created = false;
+  (scheduler as never as { env: object }).env = {
+    ...((scheduler as never as { env: Record<string, unknown> }).env),
+    CHECKS_WORKFLOW: {
+      get: async () => ({ status: async () => "errored" }),
+      create: async () => {
+        created = true;
+        return { id: "nope" };
+      },
+    },
+  };
+  await scheduler.trackAuxWorkflow({
+    kind: "checks",
+    repo: "VortexNYC/pile",
+    sha: "deadbeef1234",
+    instanceId: "wf-done",
+    params: { repo: "VortexNYC/pile", sha: "deadbeef1234" },
+  });
+  await scheduler.completeAuxWorkflow(
+    "checks",
+    "VortexNYC/pile",
+    "deadbeef1234",
+    "wf-done"
+  );
+  await scheduler.sweep();
+  assert.equal(created, false);
+  const key = "wrefire/checks/vortexnyc-pile/deadbeef12";
+  const row = await storage.get<{ status: string }>(key);
+  assert.equal(row?.status, "completed");
+});

@@ -89,6 +89,17 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
         () => fn(scheduler())
       );
 
+    await withScheduler("track-aux-wf", (stub) =>
+      stub.trackAuxWorkflow({
+        kind: "mirror",
+        repo,
+        sha,
+        branch,
+        instanceId: event.instanceId,
+        params: event.payload,
+      })
+    );
+
     const sandboxId = `mirror-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${sha.slice(0, 10)}`;
 
     const attemptAdmit = async (): Promise<
@@ -177,6 +188,9 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
           summary: `Branch ${branch} @ ${sha.slice(0, 7)} force-pushed to Artifacts.`,
         })
       );
+      await withScheduler("complete-aux-wf", (stub) =>
+        stub.completeAuxWorkflow("mirror", repo, sha, event.instanceId, branch)
+      );
     } catch (err: unknown) {
       const summary = String(err).slice(-4000);
       await step
@@ -188,6 +202,9 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
           })
         )
         .catch(() => {});
+      await withScheduler("complete-aux-wf", (stub) =>
+        stub.completeAuxWorkflow("mirror", repo, sha, event.instanceId, branch)
+      ).catch(() => {});
       throw err;
     } finally {
       await withScheduler("release", (stub) => stub.release(sandboxId)).catch(

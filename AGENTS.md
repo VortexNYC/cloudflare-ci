@@ -27,6 +27,10 @@ change this repo or its entry in `src/repos.ts`.
     newest-wins dedupe. A `completed` same-sha claim rejects late
     duplicate events (they arrive minutes late) before any container
     spawns. `completeClaim` marks the winner done at pipeline end.
+    **Aux workflows** — checks and mirror register via `trackAuxWorkflow`;
+    `completeAuxWorkflow` after GitHub conclusions (including test
+    failures) so only infra death refires. Hourly sweep refires at most
+    once (`AUX_REFIRE_MAX`), same contract as main deploy refire.
     All scheduler calls from the workflow body run as `dedupe-*`
     `step.do` steps — a DO isolate recycled mid-RPC reports
     "this Durable Object instance is no longer active", and an
