@@ -514,7 +514,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         );
       };
 
-      const results: CheckResult[] = await Promise.all(
+      results = await Promise.all(
         checks.map((check): Promise<CheckResult> =>
           runOneCheck(check).catch((err: unknown) => ({
             name: check.name,
