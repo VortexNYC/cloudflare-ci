@@ -27,7 +27,7 @@ export class CanaryWorkflow extends WorkflowEntrypoint<Bindings, { drill?: boole
       { retries: { limit: 5, delay: 5_000, backoff: "linear" }, timeout: 60_000 },
       async () => {
         const res = await scheduler().admit({
-          pool: "CHECKS",
+          pool: "AUX",
           name: sandboxId,
           instanceId: event.instanceId,
         });
@@ -35,7 +35,7 @@ export class CanaryWorkflow extends WorkflowEntrypoint<Bindings, { drill?: boole
       }
     );
     if (!admission.ok) {
-      throw new Error(`canary: ${admission.reason ?? "checks pool at capacity"}`);
+      throw new Error(`canary: ${admission.reason ?? "AUX pool at capacity"}`);
     }
 
     try {

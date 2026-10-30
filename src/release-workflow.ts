@@ -38,14 +38,14 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
     const sandboxId = `release-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${tag.replace(/[^a-z0-9-]/g, "-")}`;
     const admission = await withScheduler("admit", async (stub) => {
       const res = await stub.admit({
-        pool: "CHECKS",
+        pool: "AUX",
         name: sandboxId,
         instanceId: event.instanceId,
       });
       return { ok: res.ok, reason: "reason" in res ? res.reason : undefined };
     });
     if (!admission.ok) {
-      throw new Error(`release: ${admission.reason ?? "checks pool at capacity"}`);
+      throw new Error(`release: ${admission.reason ?? "AUX pool at capacity"}`);
     }
     try {
       const tail = await step.do("build + publish release", async () => {

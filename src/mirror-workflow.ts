@@ -10,9 +10,15 @@ import {
 } from "cloudflare:workers";
 
 import type { Bindings } from "./env";
+import {
+  AUX_ADMIT_ATTEMPTS,
+  auxAdmitRetryDelayMs,
+} from "./pool-admit";
 
 type MirrorParams = { repo: string; branch: string; sha: string };
 type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
+
+const MINUTE = 60 * 1000;
 
 const ARTIFACTS_NS = "vortex";
 
@@ -59,16 +65,36 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
       );
 
     const sandboxId = `mirror-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${sha.slice(0, 10)}`;
-    const admission = await withScheduler("admit", async (stub) => {
-      const res = await stub.admit({
-        pool: "CHECKS",
+
+    const attemptAdmit = async (): Promise<
+      { ok: true } | { ok: false; reason: string }
+    > => {
+      const res = await scheduler().admit({
+        pool: "AUX",
         name: sandboxId,
         instanceId: event.instanceId,
       });
-      return { ok: res.ok, reason: "reason" in res ? res.reason : undefined };
-    });
-    if (!admission.ok) {
-      throw new Error(`mirror: ${admission.reason ?? "checks pool at capacity"}`);
+      return res.ok
+        ? { ok: true }
+        : { ok: false, reason: "reason" in res ? res.reason : "AUX at capacity" };
+    };
+
+    const first = await withScheduler("admit", () => attemptAdmit());
+    if (!first.ok) {
+      await step.do(
+        "admit-wait",
+        {
+          retries: {
+            limit: AUX_ADMIT_ATTEMPTS,
+            delay: ({ ctx }) => auxAdmitRetryDelayMs(ctx.attempt),
+          },
+          timeout: 35 * MINUTE,
+        },
+        async () => {
+          const outcome = await attemptAdmit();
+          if (!outcome.ok) throw new Error(outcome.reason);
+        }
+      );
     }
     try {
       const token = await step.do("resolve artifacts token", () =>

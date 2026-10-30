@@ -116,9 +116,17 @@ export function parseCheckEvent(
       return null;
     const suite = payload.check_suite;
     if (!isObj(suite)) return null;
+    const headBranch = str(suite.head_branch);
+    // pull_request fires the same checks first; a second workflow per sha
+    // races on shared sandboxes. Merge-queue branches only get check_suite.
+    if (
+      str(payload.action) === "requested" &&
+      !headBranch?.includes("gh-readonly-queue/")
+    ) {
+      return null;
+    }
     const sha = str(suite.head_sha);
     if (!sha) return null;
-    const headBranch = str(suite.head_branch);
     // A suite requested on a merge-queue branch names the PR in the ref —
     // recover it so PR-body checks keep their escape hatch on that path too.
     const prMatch = headBranch?.includes("gh-readonly-queue/")

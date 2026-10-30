@@ -360,11 +360,11 @@ async function handleGitHubWebhook(
       `mirror-${target.repo}-${target.mirrorRef}-${target.sha.slice(0, 10)}`
         .toLowerCase()
         .replace(/[^a-z0-9-]/g, "-");
-    await env.MIRROR_WORKFLOW.create({
+    const created = await env.MIRROR_WORKFLOW.create({
       id,
       params: { repo: target.repo, branch: target.mirrorRef, sha: target.sha },
-    });
-    return Response.json({ ok: true, id, mirrored: target.mirrorRef });
+    }).then(() => true, () => false);
+    return Response.json({ ok: true, id, mirrored: target.mirrorRef, created });
   }
 
   const config = getRepoConfig(target.repo.split("/")[1] ?? "");
@@ -381,9 +381,18 @@ async function handleGitHubWebhook(
     }
     params.checkNames = names;
   }
-  const id = `checks-${target.repo.replace("/", "-")}-${target.sha.slice(0, 10)}-${Date.now()}`;
-  await env.CHECKS_WORKFLOW.create({ id, params });
-  return Response.json({ ok: true, id });
+  const rerunSuffix =
+    params.checkNames?.length === 1
+      ? `-rerun-${params.checkNames[0]}`
+      : "";
+  const id = `checks-${target.repo.replace("/", "-")}-${target.sha.slice(0, 10)}${rerunSuffix}`
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-");
+  const created = await env.CHECKS_WORKFLOW.create({ id, params }).then(
+    () => true,
+    () => false
+  );
+  return Response.json({ ok: true, id, created: created || undefined, deduped: !created });
 }
 
 async function handleDrill(request: Request, env: Bindings): Promise<Response> {

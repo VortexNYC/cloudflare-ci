@@ -9,6 +9,9 @@ export type PoolName =
   | "SANDBOX_LITE"
   | "SANDBOX_HEAVY"
   | "CHECKS"
+  /** Mirror, release, and canary — same ChecksSandbox containers, separate cap
+   *  so PR checks can't starve the artifacts push (or vice versa). */
+  | "AUX"
   | "EXTERNAL";
 
 // Per-app container caps — must match max_instances in wrangler.jsonc for
@@ -21,8 +24,11 @@ const POOL_LIMITS: Record<PoolName, number> = {
   SANDBOX_LITE: 10,
   SANDBOX_HEAVY: 4,
   CHECKS: 10,
+  AUX: 6,
   EXTERNAL: 16,
 };
+
+const FAILURE_ALERT_DEDUPE_MS = 6 * 60 * 60_000;
 
 // External consumers can't be destroyed through our sandbox bindings — their
 // leases self-expire so a crashed caller can't hold a slot forever.
@@ -128,10 +134,10 @@ export class CiScheduler extends DurableObject<Bindings> {
     return reaped;
   }
 
-  // CHECKS reservations live on the 1.0 DO pool — destroy is a method on the
-  // stub, not getSandbox(). The 0.x pools go through getSandbox as before.
+  // CHECKS/AUX reservations live on the 1.0 DO pool — destroy is a method on
+  // the stub, not getSandbox(). The 0.x pools go through getSandbox as before.
   private destroyPooled(r: Reservation): Promise<void> {
-    if (r.pool === "CHECKS") {
+    if (r.pool === "CHECKS" || r.pool === "AUX") {
       return this.env.CHECKS_SANDBOX.getByName(r.name).destroy();
     }
     return getSandbox(
@@ -177,8 +183,16 @@ export class CiScheduler extends DurableObject<Bindings> {
     const inPool = (await this.reservations()).filter(
       (r) => r.pool === input.pool
     );
-    if (inPool.some((r) => r.name === input.name)) {
-      return { ok: true };
+    const held = inPool.find((r) => r.name === input.name);
+    if (held) {
+      // Same workflow retrying a step — not a second run sharing one container.
+      if (held.instanceId && input.instanceId && held.instanceId === input.instanceId) {
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        reason: `${input.name} held by another run`,
+      };
     }
     const limit = POOL_LIMITS[input.pool];
     if (inPool.length >= limit) {
@@ -366,10 +380,17 @@ export class CiScheduler extends DurableObject<Bindings> {
   ): Promise<void> {
     const [repo, ...rest] = repoBranch.split("/");
     const branch = rest.join("/");
+    const sha = claim.sha ?? "unknown";
+    const dedupeKey = `alert/failure/${repo}/${branch}/${sha}`;
+    const lastAlert =
+      (await this.ctx.storage.get<number>(dedupeKey)) ?? 0;
+    if (Date.now() - lastAlert < FAILURE_ALERT_DEDUPE_MS) return;
+    await this.ctx.storage.put(dedupeKey, Date.now());
+
     const title = `CI failed: ${repo}/${branch}`;
     const description = [
       `cloudflare-ci run ${claim.instanceId} ${reason}.`,
-      `- sha: ${claim.sha ?? "unknown"}`,
+      `- sha: ${sha}`,
       `- branch: ${branch}`,
       `- refires: ${claim.refires ?? 0}`,
     ].join("\n");
@@ -431,9 +452,30 @@ export class CiScheduler extends DurableObject<Bindings> {
     }
   }
 
+  private workflowForReservation(r: Reservation) {
+    if (r.name.startsWith("mirror-")) return this.env.MIRROR_WORKFLOW;
+    if (r.name.startsWith("release-")) return this.env.RELEASE_WORKFLOW;
+    if (r.name.startsWith("canary-")) return this.env.CANARY_WORKFLOW;
+    if (r.pool === "CHECKS" || r.pool === "AUX") return this.env.CHECKS_WORKFLOW;
+    return this.env.CI_WORKFLOW;
+  }
+
   private async instanceStatus(instanceId: string): Promise<string | null> {
     try {
       const instance = await this.env.CI_WORKFLOW.get(instanceId);
+      const status = await instance.status();
+      return typeof status === "string" ? status : (status.status ?? null);
+    } catch {
+      return null;
+    }
+  }
+
+  private async instanceStatusForReservation(
+    r: Reservation
+  ): Promise<string | null> {
+    if (!r.instanceId) return null;
+    try {
+      const instance = await this.workflowForReservation(r).get(r.instanceId);
       const status = await instance.status();
       return typeof status === "string" ? status : (status.status ?? null);
     } catch {
@@ -451,7 +493,7 @@ export class CiScheduler extends DurableObject<Bindings> {
     const reaped: string[] = [];
     for (const r of await this.reservations()) {
       if (!r.instanceId) continue;
-      const status = await this.instanceStatus(r.instanceId);
+      const status = await this.instanceStatusForReservation(r);
       if (!status || status === "running" || status === "queued" || status === "paused") continue;
       try {
         await this.destroyPooled(r);

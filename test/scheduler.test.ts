@@ -35,6 +35,35 @@ function makeScheduler(storage = makeStorage()) {
   };
 }
 
+test("admit rejects a second run for the same sandbox name", async () => {
+  const { scheduler } = makeScheduler();
+  assert.deepEqual(
+    await scheduler.admit({ pool: "CHECKS", name: "checks-seal-abc-ci", instanceId: "wf-1" }),
+    { ok: true }
+  );
+  const denied = await scheduler.admit({
+    pool: "CHECKS",
+    name: "checks-seal-abc-ci",
+    instanceId: "wf-2",
+  });
+  assert.equal(denied.ok, false);
+  assert.match(denied.ok ? "" : denied.reason, /held by another run/);
+  // same workflow retrying a step is idempotent
+  assert.deepEqual(
+    await scheduler.admit({ pool: "CHECKS", name: "checks-seal-abc-ci", instanceId: "wf-1" }),
+    { ok: true }
+  );
+});
+
+test("AUX pool is separate from CHECKS", async () => {
+  const { scheduler } = makeScheduler();
+  for (let i = 0; i < 6; i++) {
+    assert.deepEqual(await scheduler.admit({ pool: "AUX", name: `m-${i}` }), { ok: true });
+  }
+  assert.equal((await scheduler.admit({ pool: "AUX", name: "m-x" })).ok, false);
+  assert.deepEqual(await scheduler.admit({ pool: "CHECKS", name: "c-0" }), { ok: true });
+});
+
 async function seedStaleReservation(
   storage: FakeStorage,
   name: string,

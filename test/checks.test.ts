@@ -119,9 +119,18 @@ test("parseCheckEvent: check_suite on a queue branch recovers the PR number", ()
   assert.equal(target?.headRef, "gh-readonly-queue/main/pr-42-abcd1234");
 });
 
-test("parseCheckEvent: check_suite requested", () => {
+test("parseCheckEvent: check_suite requested on a normal branch is ignored (pull_request owns it)", () => {
   const target = parseCheckEvent("check_suite", {
     action: "requested",
+    repository: { full_name: "VortexNYC/pile" },
+    check_suite: { head_sha: "sha9", head_branch: "feat-y" },
+  });
+  assert.equal(target, null);
+});
+
+test("parseCheckEvent: check_suite rerequested on a normal branch", () => {
+  const target = parseCheckEvent("check_suite", {
+    action: "rerequested",
     repository: { full_name: "VortexNYC/pile" },
     check_suite: { head_sha: "sha9", head_branch: "feat-y" },
   });
@@ -130,7 +139,6 @@ test("parseCheckEvent: check_suite requested", () => {
     sha: "sha9",
     headRef: "feat-y",
   });
-  assert.equal(target?.prNumber, undefined);
 });
 
 test("parseCheckEvent: unrelated events return null", () => {
