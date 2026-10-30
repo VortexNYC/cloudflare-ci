@@ -23,8 +23,8 @@ const POOL_LIMITS: Record<PoolName, number> = {
   SANDBOX: 10,
   SANDBOX_LITE: 10,
   SANDBOX_HEAVY: 4,
-  CHECKS: 10,
-  AUX: 6,
+  CHECKS: 12,
+  AUX: 8,
   EXTERNAL: 16,
 };
 

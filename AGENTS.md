@@ -18,7 +18,7 @@ change this repo or its entry in `src/repos.ts`.
 - `CiScheduler` DO (`src/scheduler.ts`, binding `CI_SCHEDULER`) owns:
  - **Admission ledger** — every sandbox spawn calls `admit()` first;
  per-pool caps (`POOL_LIMITS`: `SANDBOX`/`LITE`/`HEAVY` match `max_instances` in
- wrangler.jsonc; `CHECKS` and `AUX` are ledger-only caps on the 1.0 checks
+ wrangler.jsonc; `CHECKS`/`AUX` ledger caps are 12/8 on the 1.0 checks
  containers — mirror/release/canary use `AUX`, PR checks use `CHECKS`) deny
  oversubscription. Runner retries with backoff up
     to 10 min. Reservations older than 60 min are reaped (destroyed)

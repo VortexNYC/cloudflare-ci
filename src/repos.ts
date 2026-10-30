@@ -89,6 +89,9 @@ const repoConfigSchema = z.object({
     .default([]),
   // Per-repo install run once before checks (pnpm install, go mod download).
   checksInstallCommand: z.string().optional(),
+  // When true (default), each check gets its own container — lowest wall clock.
+  // `serial` runs one CHECKS slot for the whole suite (gitleaks → prc → ci…).
+  checksExecution: z.enum(["parallel", "serial"]).default("parallel"),
   previewCommand: z.string().optional(),
   // Post-ship probe on the lite pool, run after deploy on main only.
   // Non-zero exit fails the run — a deploy that uploads but does not serve
@@ -113,6 +116,7 @@ const buildCommand = "pnpm exec vp run build:all";
 const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
   "seal": {
     name: "seal",
+    checksExecution: "serial",
     buildEnv: {
       VITE_API_URL: "https://api.seal.nyc",
       VITE_BETTER_AUTH_URL: "https://api.seal.nyc",
@@ -334,6 +338,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
 
   vortex: {
     name: "vortex",
+    checksExecution: "serial",
     installEnv: {
       HOME: "/tmp",
       CI: "true",

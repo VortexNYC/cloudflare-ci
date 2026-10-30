@@ -8,6 +8,7 @@ import { parseCheckEvent, verifyGitHubSignature } from "./checks";
 import { getRepoConfig } from "./repos";
 import type { Bindings } from "./env";
 import type { CiScheduler } from "./scheduler";
+import { logCiEvent } from "./observability";
 
 // Same sandbox runtime on a smaller container instance_type, bound as
 // SANDBOX_LITE for steps that don't need a full build machine.
@@ -508,6 +509,17 @@ export default {
           return;
         }
         const results = await scheduler(env).sweep();
+        const poolUse = (pool: string) =>
+          results.reservations.filter((r) => r.pool === pool).length;
+        await logCiEvent(env, "ci.ledger.sweep", {
+          checksInUse: poolUse("CHECKS"),
+          checksCap: 12,
+          auxInUse: poolUse("AUX"),
+          auxCap: 8,
+          reaped: results.reaped.length,
+          deadReaped: results.deadReaped.length,
+          refired: results.refired.length,
+        });
         if (results.reaped.length > 0) console.log("sandbox sweep", results);
       })()
     );

@@ -2,7 +2,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import type { ChecksRunResult } from "./checks-sandbox";
 import type { Bindings } from "./env";
 import { getRepoConfig } from "./repos";
-import { capturePostHog } from "./posthog";
+import { logCiEvent } from "./observability";
 import {
   completeCheckRun,
   getOrCreateCheckRun,
@@ -100,6 +100,11 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       );
     }
 
+    const useSerial =
+      config.checksExecution === "serial" &&
+      checks.length > 1 &&
+      !event.payload.checkNames?.length;
+
     try {
       // PR body for checks that honor the "No tests:" escape hatch.
       const prBody = prNumber
@@ -123,6 +128,215 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         superseded?: boolean;
       }
 
+      let results!: CheckResult[];
+
+      if (useSerial) {
+        const slotName = `${sandboxId}-all`;
+        const attemptAdmit = async (): Promise<
+          | { state: "admitted" }
+          | { state: "superseded" }
+          | { state: "denied"; reason: string }
+        > => {
+          if (queueKey) {
+            const claim = await scheduler().getCheckClaim(repo, queueKey);
+            if (claim && claim.sha !== sha) return { state: "superseded" };
+          }
+          const admission = await scheduler().admit({
+            pool: "CHECKS",
+            name: slotName,
+            instanceId: event.instanceId,
+          });
+          return admission.ok
+            ? { state: "admitted" }
+            : { state: "denied", reason: admission.reason };
+        };
+
+        const first = await step.do(
+          "admit-serial",
+          {
+            retries: { limit: 5, delay: 5_000, backoff: "linear" },
+            timeout: 60_000,
+          },
+          attemptAdmit
+        );
+
+        if (first.state === "superseded") {
+          results = checks.map((c) => ({
+            name: c.name,
+            superseded: true,
+          }));
+        } else if (first.state === "denied") {
+          await logCiEvent(this.env, "ci.checks.pool_wait_started", {
+            repo,
+            sha,
+            mode: "serial",
+            reason: first.reason,
+          });
+          for (const c of checks) {
+            await step.do(`queued-${c.name}`, () =>
+              updateCheckRunStatus(token, repo, runIds[c.name]!, "queued", {
+                title: `${c.name} queued`,
+                summary: `${first.reason} — waiting for a checks slot.`,
+              }).catch(() => {})
+            );
+          }
+          const waited = await step
+            .do(
+              "admit-wait-serial",
+              {
+                retries: {
+                  limit: QUEUE_ADMIT_ATTEMPTS,
+                  delay: ({ ctx }) =>
+                    Math.min(
+                      QUEUE_ADMIT_MAX_DELAY_MS,
+                      QUEUE_ADMIT_MIN_DELAY_MS * 2 ** (ctx.attempt - 1)
+                    ),
+                },
+                timeout: 60 * MINUTE,
+              },
+              async (): Promise<"admitted" | "superseded"> => {
+                const outcome = await attemptAdmit();
+                if (outcome.state === "denied") throw new Error(outcome.reason);
+                return outcome.state;
+              }
+            )
+            .catch((): "capacity" => "capacity");
+          if (waited === "superseded") {
+            results = checks.map((c) => ({
+              name: c.name,
+              superseded: true,
+            }));
+          } else if (waited === "capacity") {
+            await logCiEvent(this.env, "ci.checks.pool_saturated", {
+              repo,
+              sha,
+              mode: "serial",
+            });
+            results = checks.map((c) => ({
+              name: c.name,
+              error:
+                "CI capacity — waited ~40m for a checks slot and the pool never freed",
+            }));
+          } else {
+            await logCiEvent(this.env, "ci.checks.pool_wait_done", {
+              repo,
+              sha,
+              mode: "serial",
+            });
+            results = await step.do(
+              "run-serial-checks",
+              {
+                retries: { limit: 2, delay: 15_000 },
+                timeout: 90 * MINUTE,
+              },
+              async (): Promise<CheckResult[]> => {
+                for (const c of checks) {
+                  await updateCheckRunStatus(
+                    token,
+                    repo,
+                    runIds[c.name]!,
+                    "in_progress"
+                  ).catch(() => {});
+                }
+                const sandbox = this.env.CHECKS_SANDBOX.getByName(slotName);
+                try {
+                  const run = await sandbox.runCheck({
+                    checkoutScript: buildCheckoutScript(event.payload),
+                    script: buildRunScript(config, checks),
+                    env: {
+                      GITHUB_TOKEN: token,
+                      NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+                      PR_BODY: prBody,
+                      CI: "true",
+                    },
+                    timeoutSec: 85 * 60,
+                    cacheRepo: config.checksInstallCommand
+                      ? repo.split("/")[1]
+                      : undefined,
+                  });
+                  const parsed = parseRunOutput(run);
+                  if (parsed.checkoutRc !== 0) {
+                    const err = `Checkout failed: ${parsed.output.slice(-2000)}`;
+                    return checks.map((c) => ({ name: c.name, error: err }));
+                  }
+                  if (parsed.installRc !== 0) {
+                    const err = `Install failed: ${parsed.output.slice(-2000)}`;
+                    return checks.map((c) => ({ name: c.name, error: err }));
+                  }
+                  return checks.map((c) => {
+                    const out = parsed.checks[c.name];
+                    return {
+                      name: c.name,
+                      ok: out?.rc === 0,
+                      output: (out?.output ?? "(no output)").slice(-4000),
+                    };
+                  });
+                } finally {
+                  await sandbox.destroy().catch(() => {});
+                  await scheduler().release(slotName).catch(() => {});
+                }
+              }
+            );
+          }
+        } else {
+          for (const c of checks) {
+            await step.do(`start-${c.name}`, () =>
+              updateCheckRunStatus(
+                token,
+                repo,
+                runIds[c.name]!,
+                "in_progress"
+              ).catch(() => {})
+            );
+          }
+          results = await step.do(
+            "run-serial-checks",
+            {
+              retries: { limit: 2, delay: 15_000 },
+              timeout: 90 * MINUTE,
+            },
+            async (): Promise<CheckResult[]> => {
+              const sandbox = this.env.CHECKS_SANDBOX.getByName(slotName);
+              try {
+                const run = await sandbox.runCheck({
+                  checkoutScript: buildCheckoutScript(event.payload),
+                  script: buildRunScript(config, checks),
+                  env: {
+                    GITHUB_TOKEN: token,
+                    NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+                    PR_BODY: prBody,
+                    CI: "true",
+                  },
+                  timeoutSec: 85 * 60,
+                  cacheRepo: config.checksInstallCommand
+                    ? repo.split("/")[1]
+                    : undefined,
+                });
+                const parsed = parseRunOutput(run);
+                if (parsed.checkoutRc !== 0) {
+                  const err = `Checkout failed: ${parsed.output.slice(-2000)}`;
+                  return checks.map((c) => ({ name: c.name, error: err }));
+                }
+                if (parsed.installRc !== 0) {
+                  const err = `Install failed: ${parsed.output.slice(-2000)}`;
+                  return checks.map((c) => ({ name: c.name, error: err }));
+                }
+                return checks.map((c) => {
+                  const out = parsed.checks[c.name];
+                  return {
+                    name: c.name,
+                    ok: out?.rc === 0,
+                    output: (out?.output ?? "(no output)").slice(-4000),
+                  };
+                });
+              } finally {
+                await sandbox.destroy().catch(() => {});
+                await scheduler().release(slotName).catch(() => {});
+              }
+            }
+          );
+        }
+      } else {
       const runOneCheck = async (
         check: (typeof checks)[number]
       ): Promise<CheckResult> => {
@@ -158,7 +372,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           return { name: check.name, superseded: true };
         }
         if (first.state === "denied") {
-          await capturePostHog(this.env, "ci.checks.pool_wait_started", {
+          await logCiEvent(this.env, "ci.checks.pool_wait_started", {
             repo,
             sha,
             check: check.name,
@@ -202,7 +416,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             return { name: check.name, superseded: true };
           }
           if (waited === "capacity") {
-            await capturePostHog(this.env, "ci.checks.pool_saturated", {
+            await logCiEvent(this.env, "ci.checks.pool_saturated", {
               repo,
               sha,
               check: check.name,
@@ -214,7 +428,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 `pool never freed (${first.reason})`,
             };
           }
-          await capturePostHog(this.env, "ci.checks.pool_wait_done", {
+          await logCiEvent(this.env, "ci.checks.pool_wait_done", {
             repo,
             sha,
             check: check.name,
@@ -298,6 +512,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           }))
         )
       );
+      }
 
       for (const r of results) {
         await step.do(`report-${r.name}`, () => {
@@ -324,12 +539,18 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         });
       }
     } finally {
+      if (useSerial) {
+        await withScheduler("release-serial", (stub) =>
+          stub.release(`${sandboxId}-all`)
+        ).catch(() => {});
+      } else {
       for (const check of checks) {
         await withScheduler(`release-${check.name}`, (stub) =>
           stub.release(
             `${sandboxId}-${check.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`
           )
         ).catch(() => {});
+      }
       }
     }
   }

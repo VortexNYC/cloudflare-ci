@@ -5,8 +5,14 @@ import {
 } from "cloudflare:workers";
 import type { Bindings } from "./env";
 import { resolveArtifactsToken } from "./mirror-workflow";
+import {
+  AUX_ADMIT_ATTEMPTS,
+  auxAdmitRetryDelayMs,
+} from "./pool-admit";
+import { logCiEvent } from "./observability";
 
 type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
+const MINUTE = 60 * 1000;
 
 // Canary — every */30 cron tick bumps a commit into the canary artifacts repo.
 // The push fires cf.artifacts.repo.pushed → a real CI run on a non-main branch
@@ -22,20 +28,44 @@ export class CanaryWorkflow extends WorkflowEntrypoint<Bindings, { drill?: boole
       this.env.CI_SCHEDULER.get(this.env.CI_SCHEDULER.idFromName("global"));
     const sandboxId = `canary-${event.instanceId.slice(0, 10)}`;
 
-    const admission = await step.do(
+    const attemptAdmit = async () => {
+      const res = await scheduler().admit({
+        pool: "AUX",
+        name: sandboxId,
+        instanceId: event.instanceId,
+      });
+      return res.ok
+        ? ({ ok: true as const })
+        : ({
+            ok: false as const,
+            reason: "reason" in res ? res.reason : "AUX at capacity",
+          });
+    };
+
+    const first = await step.do(
       "admit",
       { retries: { limit: 5, delay: 5_000, backoff: "linear" }, timeout: 60_000 },
-      async () => {
-        const res = await scheduler().admit({
-          pool: "AUX",
-          name: sandboxId,
-          instanceId: event.instanceId,
-        });
-        return { ok: res.ok, reason: "reason" in res ? res.reason : undefined };
-      }
+      attemptAdmit
     );
-    if (!admission.ok) {
-      throw new Error(`canary: ${admission.reason ?? "AUX pool at capacity"}`);
+    if (!first.ok) {
+      await logCiEvent(this.env, "ci.canary.pool_wait_started", {
+        drill,
+        reason: first.reason,
+      });
+      await step.do(
+        "admit-wait",
+        {
+          retries: {
+            limit: AUX_ADMIT_ATTEMPTS,
+            delay: ({ ctx }) => auxAdmitRetryDelayMs(ctx.attempt),
+          },
+          timeout: 35 * MINUTE,
+        },
+        async () => {
+          const outcome = await attemptAdmit();
+          if (!outcome.ok) throw new Error(outcome.reason);
+        }
+      );
     }
 
     try {

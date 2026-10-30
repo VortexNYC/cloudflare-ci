@@ -11,9 +11,15 @@ import {
 
 import type { Bindings } from "./env";
 import { getRepoConfig } from "./repos";
+import {
+  AUX_ADMIT_ATTEMPTS,
+  auxAdmitRetryDelayMs,
+} from "./pool-admit";
+import { logCiEvent } from "./observability";
 
 type ReleaseParams = { repo: string; tag: string; sha: string };
 type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
+const MINUTE = 60 * 1000;
 
 export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams> {
   async run(event: WorkflowEvent<ReleaseParams>, step: WorkflowStep) {
@@ -36,16 +42,43 @@ export class ReleaseWorkflow extends WorkflowEntrypoint<Bindings, ReleaseParams>
       );
 
     const sandboxId = `release-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${tag.replace(/[^a-z0-9-]/g, "-")}`;
-    const admission = await withScheduler("admit", async (stub) => {
-      const res = await stub.admit({
+
+    const attemptAdmit = async () => {
+      const res = await scheduler().admit({
         pool: "AUX",
         name: sandboxId,
         instanceId: event.instanceId,
       });
-      return { ok: res.ok, reason: "reason" in res ? res.reason : undefined };
-    });
-    if (!admission.ok) {
-      throw new Error(`release: ${admission.reason ?? "AUX pool at capacity"}`);
+      return res.ok
+        ? ({ ok: true as const })
+        : ({
+            ok: false as const,
+            reason: "reason" in res ? res.reason : "AUX at capacity",
+          });
+    };
+
+    const first = await withScheduler("admit", () => attemptAdmit());
+    if (!first.ok) {
+      await logCiEvent(this.env, "ci.release.pool_wait_started", {
+        repo,
+        tag,
+        sha,
+        reason: first.reason,
+      });
+      await step.do(
+        "admit-wait",
+        {
+          retries: {
+            limit: AUX_ADMIT_ATTEMPTS,
+            delay: ({ ctx }) => auxAdmitRetryDelayMs(ctx.attempt),
+          },
+          timeout: 35 * MINUTE,
+        },
+        async () => {
+          const outcome = await attemptAdmit();
+          if (!outcome.ok) throw new Error(outcome.reason);
+        }
+      );
     }
     try {
       const tail = await step.do("build + publish release", async () => {

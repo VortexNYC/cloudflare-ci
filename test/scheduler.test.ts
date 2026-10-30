@@ -6,6 +6,7 @@ import { makeStorage, type FakeStorage } from "./fakes.ts";
 
 const STALE_MS = 60 * 60 * 1000;
 const POOL_LIMIT = 10;
+const CHECKS_LIMIT = 12;
 
 class TestScheduler extends CiScheduler {
   protected override reapDestroyTimeoutMs = 25;
@@ -57,7 +58,7 @@ test("admit rejects a second run for the same sandbox name", async () => {
 
 test("AUX pool is separate from CHECKS", async () => {
   const { scheduler } = makeScheduler();
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 8; i++) {
     assert.deepEqual(await scheduler.admit({ pool: "AUX", name: `m-${i}` }), { ok: true });
   }
   assert.equal((await scheduler.admit({ pool: "AUX", name: "m-x" })).ok, false);
@@ -234,7 +235,7 @@ test("young running claims are left alone", async () => {
 
 test("CHECKS pool admits have their own ledger and reap through the DO stub", async () => {
   const { scheduler, storage, checksDestroyed } = makeScheduler();
-  for (let i = 0; i < POOL_LIMIT; i++) {
+  for (let i = 0; i < CHECKS_LIMIT; i++) {
     assert.deepEqual(
       await scheduler.admit({ pool: "CHECKS", name: `c-${i}` }),
       { ok: true }

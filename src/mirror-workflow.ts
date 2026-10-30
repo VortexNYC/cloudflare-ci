@@ -19,7 +19,7 @@ import {
   AUX_ADMIT_ATTEMPTS,
   auxAdmitRetryDelayMs,
 } from "./pool-admit";
-import { capturePostHog } from "./posthog";
+import { logCiEvent } from "./observability";
 
 type MirrorParams = { repo: string; branch: string; sha: string };
 type SchedulerStub = ReturnType<Bindings["CI_SCHEDULER"]["get"]>;
@@ -107,7 +107,7 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
     try {
       const first = await withScheduler("admit", () => attemptAdmit());
       if (!first.ok) {
-        await capturePostHog(this.env, "ci.mirror.pool_wait_started", {
+        await logCiEvent(this.env, "ci.mirror.pool_wait_started", {
           repo,
           branch,
           sha,
@@ -127,7 +127,7 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
             if (!outcome.ok) throw new Error(outcome.reason);
           }
         );
-        await capturePostHog(this.env, "ci.mirror.pool_wait_done", {
+        await logCiEvent(this.env, "ci.mirror.pool_wait_done", {
           repo,
           branch,
           sha,
