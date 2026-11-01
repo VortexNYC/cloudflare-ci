@@ -406,12 +406,9 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
         // fixed-size pool panic and dumps allocator diagnostics.
         name: "ci",
         command:
-          // The checks microVM has its own kernel — try strict overcommit
-          // off so oxc's ~4-6 GiB virtual pool reservation is granted
-          // (CommitLimit on standard-2 is ~3 GiB, hard-refusing it).
-          // If the sysctl is denied the log shows it and ci-vp-check.sh
-          // still runs with diagnostics.
-          "(sysctl -w vm.overcommit_memory=1 2>&1 || true) && " +
+          // overcommit is relaxed platform-wide by the checks runner —
+          // ci-vp-check.sh adds a bounded retry + allocator diagnostics
+          // on top for the oxc fixed-size pool panic.
           "pnpm exec vp run sdk:build && bash scripts/ci-vp-check.sh && " +
           "pnpm exec vp run openapi:verify && pnpm exec vp run contract:check && " +
           "pnpm exec vp run lint:hazards && pnpm exec vp run test:oxlint-plugin && " +

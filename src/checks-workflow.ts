@@ -654,6 +654,13 @@ export function buildRunScript(
   }>
 ): string {
   const lines: string[] = ["set +e"];
+  // oxlint's JS-plugin fixed-size pool reserves ~4-6 GiB of virtual memory
+  // in one mapping; strict overcommit (CommitLimit ≈ RAM/2 on standard-2)
+  // hard-refuses it — the oxc_allocator panic. The checks microVM has its
+  // own kernel, so relaxing overcommit grants the reservation. No-op where
+  // sysctl is unavailable. Platform-wide: any repo running `vp check` with
+  // JS plugins needs this, not just vortex.
+  lines.push("sysctl -w vm.overcommit_memory=1 > /dev/null 2>&1 || true");
   if (config.checksInstallCommand && checks.some((c) => c.needsInstall !== false)) {
     lines.push(
       // Install into the (possibly restored) store at /tmp/.pnpm-store.
