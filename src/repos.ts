@@ -370,10 +370,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       "(cd apps/element-cdn && pnpm exec vp exec wrangler deploy) && " +
       "(cd apps/ops-relay && pnpm exec vp exec wrangler deploy) && " +
       "(cd apps/anydoc-worker && pnpm exec vp exec wrangler deploy -e production) && " +
-      "(cd packages/cde-worker && pnpm exec vp exec wrangler deploy) && " +
-      // ci-worker declares a container image; the sandbox has no Docker CLI —
-      // upload the worker without rolling its containers (they deploy out of band).
-      "(cd packages/ci-worker && pnpm exec vp exec wrangler deploy --containers-rollout=none)",
+      "(cd packages/cde-worker && pnpm exec vp exec wrangler deploy)",
     previewCommand:
       '(cd packages/worker && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
       '(cd apps/dashboard && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
