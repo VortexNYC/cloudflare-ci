@@ -265,6 +265,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                       : undefined,
                   });
                   const parsed = parseRunOutput(run);
+                  warnIfOvercommitDenied(parsed, repo);
                   if (parsed.checkoutRc !== 0) {
                     const err = `Checkout failed: ${parsed.output.slice(-2000)}`;
                     return checks.map((c) => ({ name: c.name, error: err }));
@@ -323,6 +324,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                     : undefined,
                 });
                 const parsed = parseRunOutput(run);
+                warnIfOvercommitDenied(parsed, repo);
                 if (parsed.checkoutRc !== 0) {
                   const err = `Checkout failed: ${parsed.output.slice(-2000)}`;
                   return checks.map((c) => ({ name: c.name, error: err }));
@@ -483,6 +485,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                     : undefined,
               });
               const parsed = parseRunOutput(run);
+              warnIfOvercommitDenied(parsed, repo);
               if (parsed.checkoutRc !== 0) {
                 return {
                   name: check.name,
@@ -660,7 +663,11 @@ export function buildRunScript(
   // own kernel, so relaxing overcommit grants the reservation. No-op where
   // sysctl is unavailable. Platform-wide: any repo running `vp check` with
   // JS plugins needs this, not just vortex.
-  lines.push("sysctl -w vm.overcommit_memory=1 > /dev/null 2>&1 || true");
+  lines.push(
+    "sysctl -w vm.overcommit_memory=1 > /dev/null 2>&1; oc_rc=$?",
+    "echo ===CI:OVERCOMMIT:RC=$oc_rc===",
+    '[ "$oc_rc" != "0" ] && echo "warning: vm.overcommit_memory sysctl denied — oxc fixed-size pool may panic under strict overcommit"'
+  );
   if (config.checksInstallCommand && checks.some((c) => c.needsInstall !== false)) {
     lines.push(
       // Install into the (possibly restored) store at /tmp/.pnpm-store.
@@ -708,20 +715,28 @@ function shellQuote(v: string): string {
 interface ParsedRun {
   checkoutRc: number;
   installRc: number;
+  overcommitRc: number;
   checks: Record<string, CheckRunOut>;
   output: string;
 }
 
 function parseRunOutput(res: ChecksRunResult): ParsedRun {
   const text = [res.stdout, res.stderr].filter(Boolean).join("\n");
-  const parsed: ParsedRun = { checkoutRc: 1, installRc: 1, checks: {}, output: text };
+  const parsed: ParsedRun = {
+    checkoutRc: 1,
+    installRc: 1,
+    overcommitRc: 0,
+    checks: {},
+    output: text,
+  };
   let lastCheck = "";
   const buckets: Record<string, string[]> = {};
   for (const line of text.split("\n")) {
-    const ci = line.match(/^===CI:(CHECKOUT|INSTALL):RC=(\d+)===?$/);
+    const ci = line.match(/^===CI:(CHECKOUT|INSTALL|OVERCOMMIT):RC=(\d+)===?$/);
     if (ci) {
       if (ci[1] === "CHECKOUT") parsed.checkoutRc = Number(ci[2]);
-      else parsed.installRc = Number(ci[2]);
+      else if (ci[1] === "INSTALL") parsed.installRc = Number(ci[2]);
+      else parsed.overcommitRc = Number(ci[2]);
       continue;
     }
     const cm = line.match(/^===CHECK:([^:]+):(START|RC=(\d+))===$/);
@@ -739,4 +754,13 @@ function parseRunOutput(res: ChecksRunResult): ParsedRun {
     if (lastCheck) buckets[lastCheck]?.push(line);
   }
     return parsed;
+}
+
+function warnIfOvercommitDenied(parsed: ParsedRun, repo: string): void {
+  if (parsed.overcommitRc !== 0) {
+    console.warn(
+      `ci.checks.overcommit_denied repo=${repo} — vm.overcommit_memory sysctl ` +
+        `refused in the checks container; oxc fixed-size pool panics may return`
+    );
+  }
 }
