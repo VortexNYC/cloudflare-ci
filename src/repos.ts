@@ -398,11 +398,16 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
           "--exclude-globs='node_modules/**,pnpm-lock.yaml'",
       },
       {
-        // The GHA verify job: sdk:build + check + openapi:verify +
+        // The GHA verify job: check + sdk:build + openapi:verify +
         // contract:check + lint:hazards + oxlint plugin + landing.
+        // ci-vp-check.sh runs `vp check` BEFORE sdk:build: oxlint's
+        // JS-plugin fixed-size pool reserves ~4-6 GiB of VM up front and
+        // the checks container refuses it once commit charge is high.
+        // The script also retries once on that exact panic signature and
+        // dumps allocator diagnostics.
         name: "ci",
         command:
-          "pnpm exec vp run sdk:build && pnpm exec vp check && " +
+          "bash scripts/ci-vp-check.sh && pnpm exec vp run sdk:build && " +
           "pnpm exec vp run openapi:verify && pnpm exec vp run contract:check && " +
           "pnpm exec vp run lint:hazards && pnpm exec vp run test:oxlint-plugin && " +
           "pnpm exec vp run landing:typecheck && pnpm exec vp run landing:build && " +
