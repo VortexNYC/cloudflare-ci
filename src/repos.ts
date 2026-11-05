@@ -346,7 +346,12 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     },
     // sdk:build + entrypoints (root `build`), then the apps whose deploys
     // read dist/ — dashboard/landing/docs static bundles + cde's hosted pkg.
+    // Current sandbox images still have Node 22.23.2 until the Dockerfile
+    // rebuild rolls out. Astro 7.4 exits on that. Install 24.22.2 beside it.
     buildCommand:
+      "node -e 'const [M,m,p]=process.versions.node.split(\".\").map(Number); process.exit(M>22||(M===22&&(m>23||(m===23&&p>=4)))?0:1)' || " +
+      "{ mkdir -p \"$HOME/.local\" && curl -fsSL \"https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/').tar.gz\" | tar -xz -C \"$HOME/.local\" --strip-components=1; } && " +
+      "export PATH=\"$HOME/.local/bin:$PATH\" && node -v && " +
       "pnpm exec vp run build && " +
       "pnpm exec vp run -F ./apps/dashboard build && " +
       "pnpm exec vp run -F ./apps/landing build && " +
@@ -397,16 +402,15 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       {
         // The GHA verify job: sdk:build + check + openapi:verify +
         // contract:check + lint:hazards + oxlint plugin + landing.
-        // sdk:build must stay before `vp check` — the typecheck resolves
+        // sdk:build must stay before check — the typecheck resolves
         // @vortex-api/vortex types from the generated SDK.
-        // ci-vp-check.sh wraps `vp check`: retries once on the oxc
-        // fixed-size pool panic and dumps allocator diagnostics.
+        // check = lint:effect (effect-tsgo oxlint) + vp check (Vite+ fmt/lint/typecheck).
+        // Cloudflare checks runner relaxes vm.overcommit_memory for oxc JS plugins.
         name: "ci",
         command:
           // overcommit is relaxed platform-wide by the checks runner —
-          // ci-vp-check.sh adds a bounded retry + allocator diagnostics
-          // on top for the oxc fixed-size pool panic.
-          "pnpm exec vp run sdk:build && bash scripts/ci-vp-check.sh && " +
+          // see buildRunScript in checks-workflow.ts.
+          "pnpm exec vp run sdk:build && pnpm run check && " +
           "pnpm exec vp run openapi:verify && pnpm exec vp run contract:check && " +
           "pnpm exec vp run lint:hazards && pnpm exec vp run test:oxlint-plugin && " +
           "pnpm exec vp run landing:typecheck && pnpm exec vp run landing:build && " +

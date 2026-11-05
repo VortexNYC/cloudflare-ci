@@ -16,5 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     -o /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
 ENV PATH="$PATH:/usr/local/go/bin:/root/go/bin"
 
+# The sandbox base ships Node 22.23.2. Astro 7.4 refuses anything below 22.23.4.
+# Vortex engines are Node 24, so the image matches that floor.
+ARG NODE_VERSION=24.22.2
+RUN ARCH="$(dpkg --print-architecture | sed 's/amd64/x64/;s/arm64/arm64/')" \
+ && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.gz" -o /tmp/node.tgz \
+ && tar -C /usr/local --strip-components=1 -xzf /tmp/node.tgz \
+ && rm /tmp/node.tgz \
+ && node --version | grep -q "^v${NODE_VERSION}"
+
 # trufflehog 3.97.1 — matches the version vortex's trufflehog.yml pins.
 RUN ARCH="$(dpkg --print-architecture | sed 's/amd64/amd64/;s/arm64/arm64/')"  && curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.1/trufflehog_3.97.1_linux_${ARCH}.tar.gz"     -o /tmp/trufflehog.tgz && tar -C /usr/local/bin -xzf /tmp/trufflehog.tgz trufflehog && rm /tmp/trufflehog.tgz
