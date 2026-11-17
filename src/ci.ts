@@ -772,25 +772,27 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         };
         if (publication.name === "publish-go-sdk") {
           const goToken = await step.do("mint-vortex-go-token", async () => {
-            if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_PRIVATE_KEY) {
-              throw new Error("GitHub App credentials are not bound");
-            }
-            return getInstallationToken(
-              this.env.GITHUB_APP_ID,
-              this.env.GITHUB_APP_PRIVATE_KEY,
-              "VortexNYC/vortex-go",
-              {
-                installationId: 182801553,
-                repositories: ["vortex-go"],
-                permissions: { contents: "write" },
+            try {
+              if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_PRIVATE_KEY) {
+                throw new Error("GitHub App credentials are not bound");
               }
-            );
-          }).catch((error) => {
-            console.error(
-              "[cloudflare-ci] skipping Go SDK publication; GitHub App token mint failed",
-              error
-            );
-            return null;
+              return await getInstallationToken(
+                this.env.GITHUB_APP_ID,
+                this.env.GITHUB_APP_PRIVATE_KEY,
+                "VortexNYC/vortex-go",
+                {
+                  installationId: 182801553,
+                  repositories: ["vortex-go"],
+                  permissions: { contents: "write" },
+                }
+              );
+            } catch (error) {
+              console.error(
+                "[cloudflare-ci] skipping Go SDK publication; GitHub App token mint failed",
+                error
+              );
+              return null;
+            }
           });
           if (!goToken) continue;
           publicationEnv = { ...publicationEnv, GITHUB_TOKEN: goToken };
