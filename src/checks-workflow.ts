@@ -285,13 +285,20 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         error?: string;
         /** Cancelled while queued — a newer sha claimed the ref. */
         superseded?: boolean;
+        metric?: CheckMetric;
       }
+
+      const recordMetric = (result: CheckResult): Promise<void> =>
+        result.metric
+          ? step.do(`metric-${result.name}`, async () => {
+              writeCheckMetric(this.env, result.metric!);
+            })
+          : Promise.resolve();
 
       let results!: CheckResult[];
 
       if (useSerial) {
         const slotName = `${sandboxId}-all`;
-        const serialWaitStarted = Date.now();
         const attemptAdmit = async (): Promise<
           | { state: "admitted" }
           | { state: "superseded" }
@@ -317,20 +324,28 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             retries: { limit: 5, delay: 5_000, backoff: "linear" },
             timeout: 60_000,
           },
-          attemptAdmit
+          async () => {
+            const waitStartedAt = Date.now();
+            const outcome = await attemptAdmit();
+            return { outcome, waitStartedAt, admittedAt: Date.now() };
+          }
         );
 
-        if (first.state === "superseded") {
+        if (first.outcome.state === "superseded") {
           results = serialChecks.map((c) => ({
             name: c.name,
             superseded: true,
+            metric: {
+              repo, sha, job: c.name, waitMs: 0, setupMs: 0, runMs: 0,
+              result: "superseded", prNumber, ref: headRef,
+            },
           }));
-        } else if (first.state === "denied") {
+        } else if (first.outcome.state === "denied") {
           await logCiEvent(this.env, "ci.checks.pool_wait_started", {
             repo,
             sha,
             mode: "serial",
-            reason: first.reason,
+            reason: first.outcome.reason,
           });
           for (const c of serialChecks) {
             await step.do(`queued-${c.name}`, () =>
@@ -338,8 +353,9 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 ? Promise.resolve()
                 : updateCheckRunStatus(token, repo, runIds[c.name]!, "queued", {
                     title: `${c.name} queued`,
-                    summary: `${first.reason} — waiting for a checks slot.`,
+                    summary: `${first.outcome.reason} — waiting for a checks slot.`,
                   }).catch(() => {})
+
             );
           }
           const waited = await step
@@ -356,19 +372,25 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 },
                 timeout: 60 * MINUTE,
               },
-              async (): Promise<"admitted" | "superseded"> => {
+              async (): Promise<{ state: "admitted" | "superseded"; admittedAt: number }> => {
                 const outcome = await attemptAdmit();
                 if (outcome.state === "denied") throw new Error(outcome.reason);
-                return outcome.state;
+                return { state: outcome.state, admittedAt: Date.now() };
               }
             )
-            .catch((): "capacity" => "capacity");
-          if (waited === "superseded") {
+            .catch((): { state: "capacity" } => ({ state: "capacity" }));
+          const serialWaitMs =
+            waited.state === "capacity" ? 0 : waited.admittedAt - first.waitStartedAt;
+          if (waited.state === "superseded") {
             results = serialChecks.map((c) => ({
               name: c.name,
               superseded: true,
+              metric: {
+                repo, sha, job: c.name, waitMs: serialWaitMs, setupMs: 0, runMs: 0,
+                result: "superseded", prNumber, ref: headRef,
+              },
             }));
-          } else if (waited === "capacity") {
+          } else if (waited.state === "capacity") {
             await logCiEvent(this.env, "ci.checks.pool_saturated", {
               repo,
               sha,
@@ -378,6 +400,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               name: c.name,
               error:
                 "CI capacity — waited ~40m for a checks slot and the pool never freed",
+              metric: {
+                repo, sha, job: c.name, waitMs: serialWaitMs, setupMs: 0, runMs: 0,
+                result: "failure", prNumber, ref: headRef,
+              },
             }));
           } else {
             await logCiEvent(this.env, "ci.checks.pool_wait_done", {
@@ -420,26 +446,21 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                   });
                   const parsed = parseRunOutput(run);
                   const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
-                  for (const check of checks) {
-                    const out = parsed.checks[check.name];
-                    writeCheckMetric(this.env, {
-                      repo, sha, job: check.name,
-                      waitMs: Date.now() - serialWaitStarted,
-                      setupMs, runMs: run.checkMs[check.name] ?? 0,
-                      result: parsed.checkoutRc !== 0 || parsed.installRc !== 0
-                        ? "failure"
-                        : out?.rc === 0 ? "success" : "failure",
-                      prNumber, ref: headRef,
-                    });
-                  }
+                  const metricFor = (check: (typeof serialChecks)[number]): CheckMetric => ({
+                    repo, sha, job: check.name, waitMs: serialWaitMs, setupMs,
+                    runMs: run.checkMs[check.name] ?? 0,
+                    result: parsed.checkoutRc !== 0 || parsed.installRc !== 0
+                      ? "failure" : parsed.checks[check.name]?.rc === 0 ? "success" : "failure",
+                    prNumber, ref: headRef,
+                  });
                   warnIfOvercommitDenied(parsed, repo);
                   if (parsed.checkoutRc !== 0) {
                     const err = `Checkout failed: ${parsed.output.slice(-2000)}`;
-                    return serialChecks.map((c) => ({ name: c.name, error: err }));
+                    return serialChecks.map((c) => ({ name: c.name, error: err, metric: metricFor(c) }));
                   }
                   if (parsed.installRc !== 0) {
                     const err = `Install failed: ${parsed.output.slice(-2000)}`;
-                    return serialChecks.map((c) => ({ name: c.name, error: err }));
+                    return serialChecks.map((c) => ({ name: c.name, error: err, metric: metricFor(c) }));
                   }
                   return serialChecks.map((c) => {
                     const out = parsed.checks[c.name];
@@ -447,6 +468,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                       name: c.name,
                       ok: out?.rc === 0,
                       output: (out?.output ?? "(no output)").slice(-4000),
+                      metric: metricFor(c),
                     };
                   });
                 } finally {
@@ -457,6 +479,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             );
           }
         } else {
+          const serialWaitMs = first.admittedAt - first.waitStartedAt;
           for (const c of serialChecks) {
             await step.do(`start-${c.name}`, () =>
               event.payload.scheduled
@@ -494,26 +517,21 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 });
                 const parsed = parseRunOutput(run);
                 const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
-                for (const check of checks) {
-                  const out = parsed.checks[check.name];
-                  writeCheckMetric(this.env, {
-                    repo, sha, job: check.name,
-                    waitMs: Date.now() - serialWaitStarted,
-                    setupMs, runMs: run.checkMs[check.name] ?? 0,
-                    result: parsed.checkoutRc !== 0 || parsed.installRc !== 0
-                      ? "failure"
-                      : out?.rc === 0 ? "success" : "failure",
-                    prNumber, ref: headRef,
-                  });
-                }
+                const metricFor = (check: (typeof serialChecks)[number]): CheckMetric => ({
+                  repo, sha, job: check.name, waitMs: serialWaitMs, setupMs,
+                  runMs: run.checkMs[check.name] ?? 0,
+                  result: parsed.checkoutRc !== 0 || parsed.installRc !== 0
+                    ? "failure" : parsed.checks[check.name]?.rc === 0 ? "success" : "failure",
+                  prNumber, ref: headRef,
+                });
                 warnIfOvercommitDenied(parsed, repo);
                 if (parsed.checkoutRc !== 0) {
                   const err = `Checkout failed: ${parsed.output.slice(-2000)}`;
-                  return serialChecks.map((c) => ({ name: c.name, error: err }));
+                  return serialChecks.map((c) => ({ name: c.name, error: err, metric: metricFor(c) }));
                 }
                 if (parsed.installRc !== 0) {
                   const err = `Install failed: ${parsed.output.slice(-2000)}`;
-                  return serialChecks.map((c) => ({ name: c.name, error: err }));
+                  return serialChecks.map((c) => ({ name: c.name, error: err, metric: metricFor(c) }));
                 }
                 return serialChecks.map((c) => {
                   const out = parsed.checks[c.name];
@@ -521,6 +539,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                     name: c.name,
                     ok: out?.rc === 0,
                     output: (out?.output ?? "(no output)").slice(-4000),
+                    metric: metricFor(c),
                   };
                 });
               } finally {
@@ -541,8 +560,6 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         check: (typeof runnable)[number]
       ): Promise<CheckResult> => {
         const checkSandboxId = `${sandboxId}-${check.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
-        const waitStarted = Date.now();
-        let waitMs = 0;
         const attemptAdmit = async (): Promise<
           | { state: "admitted" }
           | { state: "superseded" }
@@ -568,21 +585,29 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             retries: { limit: 5, delay: 5_000, backoff: "linear" },
             timeout: 60_000,
           },
-          attemptAdmit
+          async () => {
+            const waitStartedAt = Date.now();
+            const outcome = await attemptAdmit();
+            return { outcome, waitStartedAt, admittedAt: Date.now() };
+          }
         );
-        if (first.state === "superseded") {
-          writeCheckMetric(this.env, {
-            repo, sha, job: check.name, waitMs: Date.now() - waitStarted,
-            setupMs: 0, runMs: 0, result: "superseded", prNumber, ref: headRef,
-          });
-          return { name: check.name, superseded: true };
+        if (first.outcome.state === "superseded") {
+          return {
+            name: check.name,
+            superseded: true,
+            metric: {
+              repo, sha, job: check.name, waitMs: 0, setupMs: 0, runMs: 0,
+              result: "superseded", prNumber, ref: headRef,
+            },
+          };
         }
-        if (first.state === "denied") {
+        let waitMs: number;
+        if (first.outcome.state === "denied") {
           await logCiEvent(this.env, "ci.checks.pool_wait_started", {
             repo,
             sha,
             check: check.name,
-            reason: first.reason,
+            reason: first.outcome.reason,
           });
           // The pool is saturated — keep the check run "queued" and poll
           // for a slot inside the workflow instead of failing the check
@@ -592,8 +617,9 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               ? Promise.resolve()
               : updateCheckRunStatus(token, repo, runIds[check.name]!, "queued", {
                   title: `${check.name} queued`,
-                  summary: `${first.reason} — waiting for a checks slot to free up.`,
+                  summary: `${first.outcome.reason} — waiting for a checks slot to free up.`,
                 }).catch(() => {})
+
           );
           const waited = await step
             .do(
@@ -609,39 +635,46 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 },
                 timeout: 60 * MINUTE,
               },
-              async (): Promise<"admitted" | "superseded"> => {
+              async (): Promise<{ state: "admitted" | "superseded"; admittedAt: number }> => {
                 const outcome = await attemptAdmit();
                 if (outcome.state === "denied")
                   throw new Error(outcome.reason);
-                return outcome.state;
+                return { state: outcome.state, admittedAt: Date.now() };
               }
             )
             // Retries exhausted (still saturated) or a persistent
             // scheduler failure — the queue bound ends in an honest
             // failure, not a check stuck queued forever.
-            .catch((): "capacity" => "capacity");
-          if (waited === "superseded") {
-            writeCheckMetric(this.env, {
-              repo, sha, job: check.name, waitMs: Date.now() - waitStarted,
-              setupMs: 0, runMs: 0, result: "superseded", prNumber, ref: headRef,
-            });
-            return { name: check.name, superseded: true };
+            .catch((): { state: "capacity" } => ({ state: "capacity" }));
+          const queuedWaitMs =
+            waited.state === "capacity"
+              ? 0
+              : waited.admittedAt - first.waitStartedAt;
+          if (waited.state === "superseded") {
+            return {
+              name: check.name,
+              superseded: true,
+              metric: {
+                repo, sha, job: check.name, waitMs: queuedWaitMs,
+                setupMs: 0, runMs: 0, result: "superseded", prNumber, ref: headRef,
+              },
+            };
           }
-          if (waited === "capacity") {
+          if (waited.state === "capacity") {
             await logCiEvent(this.env, "ci.checks.pool_saturated", {
               repo,
               sha,
               check: check.name,
             });
-            writeCheckMetric(this.env, {
-              repo, sha, job: check.name, waitMs: Date.now() - waitStarted,
-              setupMs: 0, runMs: 0, result: "failure", prNumber, ref: headRef,
-            });
             return {
               name: check.name,
               error:
                 "CI capacity — waited ~40m for a checks slot and the " +
-                `pool never freed (${first.reason})`,
+                `pool never freed (${first.outcome.reason})`,
+              metric: {
+                repo, sha, job: check.name, waitMs: queuedWaitMs,
+                setupMs: 0, runMs: 0, result: "failure", prNumber, ref: headRef,
+              },
             };
           }
           await logCiEvent(this.env, "ci.checks.pool_wait_done", {
@@ -659,8 +692,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                   "in_progress"
                 ).catch(() => {})
           );
+          waitMs = queuedWaitMs;
+        } else {
+          waitMs = first.admittedAt - first.waitStartedAt;
         }
-        waitMs = Date.now() - waitStarted;
 
         // Check-declared secrets: names are looked up on this Worker's
         // env and injected into the sandbox — an unbound name lands as
@@ -713,38 +748,32 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               });
               const parsed = parseRunOutput(run);
               const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
+              const metricFor = (result: CheckMetric["result"]): CheckMetric => ({
+                repo, sha, job: check.name, waitMs, setupMs,
+                runMs: run.checkMs[check.name] ?? 0,
+                result, prNumber, ref: headRef,
+              });
               warnIfOvercommitDenied(parsed, repo);
               if (parsed.checkoutRc !== 0) {
-                writeCheckMetric(this.env, {
-                  repo, sha, job: check.name, waitMs, setupMs,
-                  runMs: 0, result: "failure", prNumber, ref: headRef,
-                });
                 return {
                   name: check.name,
                   error: `Checkout failed: ${scrub(parsed.output).slice(-2000)}`,
+                  metric: metricFor("failure"),
                 };
               }
               if (parsed.installRc !== 0) {
-                writeCheckMetric(this.env, {
-                  repo, sha, job: check.name, waitMs, setupMs,
-                  runMs: 0, result: "failure", prNumber, ref: headRef,
-                });
                 return {
                   name: check.name,
                   error: `Install failed: ${scrub(parsed.output).slice(-2000)}`,
+                  metric: metricFor("failure"),
                 };
               }
               const out = parsed.checks[check.name];
-              writeCheckMetric(this.env, {
-                repo, sha, job: check.name, waitMs, setupMs,
-                runMs: run.checkMs[check.name] ?? 0,
-                result: out?.rc === 0 ? "success" : "failure",
-                prNumber, ref: headRef,
-              });
               return {
                 name: check.name,
                 ok: out?.rc === 0,
                 output: scrub(out?.output ?? "(no output)").slice(-4000),
+                metric: metricFor(out?.rc === 0 ? "success" : "failure"),
               };
             } finally {
               // Destroy while the reservation is still held — a wedged

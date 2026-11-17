@@ -187,5 +187,5 @@
       "binding": "CI_METRICS",
       "dataset": "ci_metrics"
     }
-  }
+  ]
 }

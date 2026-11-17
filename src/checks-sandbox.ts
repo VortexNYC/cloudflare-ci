@@ -64,6 +64,8 @@ export interface ChecksRunResult {
   checkMs: Record<string, number>;
 }
 
+type ScriptResult = Pick<ChecksRunResult, "exitCode" | "stdout" | "stderr">;
+
 export class ChecksSandbox extends DurableObject<Bindings> {
   private readonly container: Container;
   private readonly files: Files;
@@ -130,7 +132,7 @@ export class ChecksSandbox extends DurableObject<Bindings> {
     script: string,
     timeoutSec: number,
     env: Record<string, string>
-  ): Promise<ChecksRunResult> {
+  ): Promise<ScriptResult> {
     await this.files.writeFile(path, script);
     // GNU timeout kills the process group — an AbortSignal would orphan the
     // script's children. Exit code 124 means the bound was hit.

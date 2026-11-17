@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   getOrCreateCheckRun,
   parseCheckEvent,
@@ -238,9 +239,22 @@ test("buildRunScript wraps timeoutMs checks in GNU timeout, others plain", () =>
     { name: "unbounded", command: "pnpm lint" },
   ]);
   assert.match(script, /timeout --kill-after=10 600 bash -c 'pnpm test' > \/tmp\/check-bounded\.out/);
-  assert.match(script, /install_started=\$\(date \+%s%3N\)/);
   assert.match(script, /check_ms=\$\(\( \$\(date \+%s%3N\) - check_started \)\)/);
   assert.match(script, /^bash -c 'pnpm lint' > \/tmp\/check-unbounded\.out 2>&1$/m);
+});
+
+test("buildRunScript preserves a failing check RC after timing markers", () => {
+  const script = buildRunScript({}, [{ name: "failing", command: "false" }]);
+  const output = execFileSync("bash", ["-c", script], { encoding: "utf8" });
+  assert.match(output, /===CHECK:failing:RC=1===/);
+});
+
+test("buildRunScript emits install timing when install is configured", () => {
+  const script = buildRunScript(
+    { checksInstallCommand: "true" },
+    [{ name: "ci", command: "true" }]
+  );
+  assert.match(script, /install_started=\$\(date \+%s%3N\)/);
 });
 
 test("buildRunScript passes per-check env through the timeout wrapper", () => {
