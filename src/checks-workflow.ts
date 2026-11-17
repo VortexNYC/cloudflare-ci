@@ -341,11 +341,12 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             },
           }));
         } else if (first.outcome.state === "denied") {
+          const queueReason = first.outcome.reason;
           await logCiEvent(this.env, "ci.checks.pool_wait_started", {
             repo,
             sha,
             mode: "serial",
-            reason: first.outcome.reason,
+            reason: queueReason,
           });
           for (const c of serialChecks) {
             await step.do(`queued-${c.name}`, () =>
@@ -355,6 +356,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                     title: `${c.name} queued`,
                     summary: `${first.outcome.reason} — waiting for a checks slot.`,
                   }).catch(() => {})
+
 
             );
           }
@@ -519,7 +521,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
                 const metricFor = (check: (typeof serialChecks)[number]): CheckMetric => ({
                   repo, sha, job: check.name, waitMs: serialWaitMs, setupMs,
-                  runMs: run.checkMs[check.name] ?? 0,
+                runMs: run.checkMs?.[check.name] ?? 0,
                   result: parsed.checkoutRc !== 0 || parsed.installRc !== 0
                     ? "failure" : parsed.checks[check.name]?.rc === 0 ? "success" : "failure",
                   prNumber, ref: headRef,
@@ -603,11 +605,12 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         }
         let waitMs: number;
         if (first.outcome.state === "denied") {
+          const queueReason = first.outcome.reason;
           await logCiEvent(this.env, "ci.checks.pool_wait_started", {
             repo,
             sha,
             check: check.name,
-            reason: first.outcome.reason,
+            reason: queueReason,
           });
           // The pool is saturated — keep the check run "queued" and poll
           // for a slot inside the workflow instead of failing the check
@@ -619,6 +622,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                   title: `${check.name} queued`,
                   summary: `${first.outcome.reason} — waiting for a checks slot to free up.`,
                 }).catch(() => {})
+
 
           );
           const waited = await step
@@ -670,7 +674,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               name: check.name,
               error:
                 "CI capacity — waited ~40m for a checks slot and the " +
-                `pool never freed (${first.outcome.reason})`,
+                `pool never freed (${queueReason})`,
               metric: {
                 repo, sha, job: check.name, waitMs: queuedWaitMs,
                 setupMs: 0, runMs: 0, result: "failure", prNumber, ref: headRef,
@@ -750,7 +754,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
               const metricFor = (result: CheckMetric["result"]): CheckMetric => ({
                 repo, sha, job: check.name, waitMs, setupMs,
-                runMs: run.checkMs[check.name] ?? 0,
+                  runMs: run.checkMs?.[check.name] ?? 0,
                 result, prNumber, ref: headRef,
               });
               warnIfOvercommitDenied(parsed, repo);
@@ -1055,8 +1059,9 @@ export function buildRunScript(
     lines.push(
       "check_started=$(date +%s%3N)",
       `${invocation} > ${outFile} 2>&1`,
+      "rc=$?",
       `check_ms=$(( $(date +%s%3N) - check_started )); echo ===CHECK:${check.name}:MS=$check_ms===`,
-      `rc=$?; echo ===CHECK:${check.name}:START===`,
+      `echo ===CHECK:${check.name}:START===`,
       `tail -c 3500 ${outFile}`,
       `echo ===CHECK:${check.name}:RC=$rc===`
     );
