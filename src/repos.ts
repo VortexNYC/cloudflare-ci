@@ -431,14 +431,16 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       "pnpm exec vp run -F @vortex/hosted build",
     // Sandbox promotion is deploy-only for now. Database migrations stay on
     // the production migration step until Sandbox connectivity is proven.
+    // `vp` is not on PATH in deploy containers — invoke it via `pnpm exec vp`
+    // in every chunk (VOR-304; a bare `vp` exits 127 mid-promotion).
     preDeployCommand:
       "bash scripts/deploy-worker.sh sandbox && " +
-      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include OpsRelaySandbox) && " +
-      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include AuthSandbox --include EdgeRateLimit) && " +
-      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include CdeSandbox) && " +
-      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include DashboardSandbox) && " +
-      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include LandingSandbox) && " +
-      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include ElementCdnSandbox)",
+      "(pnpm exec vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include OpsRelaySandbox) && " +
+      "(pnpm exec vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include AuthSandbox --include EdgeRateLimit) && " +
+      "(pnpm exec vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include CdeSandbox) && " +
+      "(pnpm exec vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include DashboardSandbox) && " +
+      "(pnpm exec vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include LandingSandbox) && " +
+      "(pnpm exec vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include ElementCdnSandbox)",
     preDeployVerifyCommand:
       "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.sandbox.vortex.nyc && " +
       "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://app.sandbox.vortex.nyc --spa",
@@ -451,7 +453,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     deployCommand:
       "SKIP_MIGRATE=1 bash scripts/deploy-worker.sh && " +
       "(cd packages/global && pnpm exec vp exec wrangler deploy) && " +
-      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage production --no-input --yes --include Dashboard) && " +
+      "(pnpm exec vp exec alchemy deploy scripts/alchemy/run.ts --stage production --no-input --yes --include Dashboard) && " +
       "(cd apps/landing && pnpm exec vp exec wrangler deploy) && " +
       "(cd apps/docs && pnpm exec vp exec wrangler deploy --config dist/server/wrangler.json) && " +
       "(cd apps/element-cdn && pnpm exec vp exec wrangler deploy) && " +

@@ -245,18 +245,33 @@ export class CiScheduler extends DurableObject<Bindings> {
    * Atomic newest-wins claim per repo+branch. Returns false when the branch's
    * sha already completed — duplicate events arrive minutes late and would
    * otherwise re-run the whole pipeline after the winner finished.
+   * An errored same-sha claim also rejects — except when the new run carries
+   * an explicit `retry: true` in its params (an operator-created instance
+   * re-running a fixed pipeline), which re-claims the sha.
    */
   async claim(
     repo: string,
     branch: string,
     instanceId: string,
     sha?: string,
-    params?: CiParams<CloudflareArtifacts>
+    params?: CiParams<CloudflareArtifacts> & { retry?: boolean }
   ): Promise<boolean> {
     const existing = await this.getClaim(repo, branch);
     if (existing && sha && existing.sha === sha) {
-      if (existing.status === "completed" || existing.status === "errored") {
+      if (existing.status === "completed") {
         return false;
+      }
+      if (existing.status === "errored") {
+        if (params?.retry !== true) {
+          return false;
+        }
+        await logCiEvent(this.env, "ci.claim.retry", {
+          repo,
+          branch,
+          sha,
+          instanceId,
+          previousInstanceId: existing.instanceId,
+        });
       }
       if (existing.status === "running" && existing.instanceId !== instanceId) {
         // Duplicate delivery of a run already in flight — same sha, different

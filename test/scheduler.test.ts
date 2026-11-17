@@ -123,6 +123,39 @@ test("claim is newest-wins and rejects a completed same-sha duplicate", async ()
   assert.equal((await scheduler.getClaim("seal", "main"))?.status, "running");
 });
 
+test("an errored same-sha claim rejects duplicates but an explicit retry re-claims", async () => {
+  const { scheduler, storage } = makeScheduler();
+  assert.equal(await scheduler.claim("vortex", "main", "i1", "sha1"), true);
+  const claim = await scheduler.getClaim("vortex", "main");
+  await storage.put("claim/vortex/main", { ...claim, status: "errored" });
+  // a late duplicate event for the failed sha is still deduped
+  assert.equal(await scheduler.claim("vortex", "main", "i2", "sha1"), false);
+  // an operator-created retry instance re-claims the errored sha
+  const retry = { retry: true } as unknown as Parameters<
+    typeof scheduler.claim
+  >[4];
+  assert.equal(
+    await scheduler.claim("vortex", "main", "vortex-main-sha1-refire-1", "sha1", retry),
+    true
+  );
+  const after = await scheduler.getClaim("vortex", "main");
+  assert.equal(after?.instanceId, "vortex-main-sha1-refire-1");
+  assert.equal(after?.status, "running");
+  // a completed sha is never re-claimed — even with retry set
+  await scheduler.completeClaim("vortex", "main", "vortex-main-sha1-refire-1");
+  assert.equal(await scheduler.claim("vortex", "main", "i3", "sha1", retry), false);
+});
+
+test("a running same-sha claim is deduped even for a retry instance", async () => {
+  const { scheduler } = makeScheduler();
+  assert.equal(await scheduler.claim("vortex", "main", "i1", "sha1"), true);
+  const retry = { retry: true } as unknown as Parameters<
+    typeof scheduler.claim
+  >[4];
+  assert.equal(await scheduler.claim("vortex", "main", "i2", "sha1", retry), false);
+  assert.equal((await scheduler.getClaim("vortex", "main"))?.instanceId, "i1");
+});
+
 test("a wedged destroy does not stall the reaper or drop the ledger entry", async () => {
   const { scheduler, storage } = makeScheduler();
   await seedStaleReservation(storage, "wedged");

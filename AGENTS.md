@@ -144,6 +144,12 @@ against cloudflare's repo when there's bandwidth.
   `crons` — duplicate keys silently drop the push trigger.
 - Stuck run: `wrangler workflows instances terminate cloudflare-ci <id>`,
   then `/admin/sandbox/sweep` to release its reservation.
+- Re-firing an errored run: the dedupe claim rejects same-sha instances
+  whose claim ended `completed` or `errored`. Create the retry instance
+  with the original push params plus `"retry": true`
+  (`wrangler workflows trigger cloudflare-ci --id <repo>-<branch>-<sha>-refire-N
+  --params '{...,"retry":true}'`) — it re-claims the errored sha. Completed
+  shas and in-flight runs still dedupe.
 
 ## Deployment maturity model (VTX-587)
 
