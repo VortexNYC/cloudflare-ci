@@ -73,6 +73,15 @@ Nothing is committed. Required worker secrets (set with `wrangler secret put`):
 - `POST /admin/sandbox/kill {name}` — destroy one sandbox.
 - Deploy resets live isolates — never deploy while a run is in flight.
 
+## CI metrics
+
+Check telemetry is written to the `ci_metrics` Analytics Engine dataset. Each
+data point stores `wait_ms`, `setup_ms` (checkout, cache restore, and install),
+`run_ms`, and the result, indexed by repository, job, result, and ref. The
+Monday `0 9 * * 1` cron emits `ci.metrics.weekly_report`; use the last 150
+check-run points to publish median and p95 by job and the ticket's run/merge
+ratios without changing CI behavior.
+
 ## License
 
 MIT

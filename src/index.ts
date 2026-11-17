@@ -584,9 +584,18 @@ export default {
           await env.CANARY_WORKFLOW.create({ id: `canary-${Date.now()}`, params: {} });
           return;
         }
+        if (event.cron === "0 9 * * 1") {
+          await logCiEvent(env, "ci.metrics.weekly_report", {
+            dataset: "ci_metrics",
+            window: "last_150_runs",
+            dimensions: ["wait_ms", "setup_ms", "run_ms", "result"],
+            aggregates: ["median", "p95", "runs_per_merged_pr", "update_from_main_share"],
+          });
+        }
         // Dedicated schedule ticks dispatch and stop; the existing */15 tick
         // also keeps the ledger sweep it already owned.
         if (jobs.length > 0 && event.cron !== "*/15 * * * *") return;
+
         const results = await scheduler(env).sweep();
         const poolUse = (pool: string) =>
           results.reservations.filter((r) => r.pool === pool).length;
