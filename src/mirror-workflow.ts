@@ -73,8 +73,15 @@ export class MirrorWorkflow extends WorkflowEntrypoint<Bindings, MirrorParams> {
       throw new Error("mirror: no GitHub token — cannot post required check run");
     }
 
+    const appId = Number(this.env.GITHUB_APP_ID);
     const checkRunId = await step.do("open-mirror-check", () =>
-      getOrCreateCheckRun(githubToken, repo, sha, MIRROR_CHECK_NAME)
+      getOrCreateCheckRun(
+        githubToken,
+        repo,
+        sha,
+        MIRROR_CHECK_NAME,
+        Number.isFinite(appId) ? appId : undefined
+      )
     );
 
     const scheduler = () =>

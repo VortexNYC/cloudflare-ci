@@ -340,3 +340,96 @@ test("getOrCreateCheckRun creates when no run exists for the name", async () => 
     globalThis.fetch = realFetch;
   }
 });
+
+test("getOrCreateCheckRun does not PATCH a same-named run owned by another app", async () => {
+  // Regression: a leftover GitHub Actions workflow's check run shares the
+  // name. Reusing it PATCHed a foreign run → 403 killed the checks
+  // Workflow and left ci/gitleaks/prc/trufflehog in_progress forever.
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
+    if (url.includes("/check-runs?")) {
+      return Response.json({
+        total_count: 1,
+        check_runs: [{ id: 9001, app: { id: 15368, slug: "github-actions" } }],
+      });
+    }
+    return Response.json({ id: 77 }, { status: 201 });
+  };
+  try {
+    const id = await getOrCreateCheckRun("t", "VortexNYC/pile", "abc123", "ci", 424242);
+    assert.equal(id, 77);
+    assert.deepEqual(calls, [
+      "GET /repos/VortexNYC/pile/commits/abc123/check-runs",
+      "POST /repos/VortexNYC/pile/check-runs",
+    ]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("getOrCreateCheckRun falls back to create when the PATCH is refused with 403", async () => {
+  // App id unknown (PAT token): a foreign run slips through reuse and
+  // GitHub still refuses the PATCH — create our own instead of throwing.
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
+    if (url.includes("/check-runs?")) {
+      return Response.json({
+        total_count: 1,
+        check_runs: [{ id: 9001, app: { id: 15368 } }],
+      });
+    }
+    if (init?.method === "PATCH") {
+      return new Response(
+        JSON.stringify({
+          message:
+            "Invalid app_id `15368` - check run can only be modified by the GitHub App that created it.",
+        }),
+        { status: 403 }
+      );
+    }
+    return Response.json({ id: 77 }, { status: 201 });
+  };
+  try {
+    const id = await getOrCreateCheckRun("t", "VortexNYC/pile", "abc123", "ci");
+    assert.equal(id, 77);
+    assert.deepEqual(calls, [
+      "GET /repos/VortexNYC/pile/commits/abc123/check-runs",
+      "PATCH /repos/VortexNYC/pile/check-runs/9001",
+      "POST /repos/VortexNYC/pile/check-runs",
+    ]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("getOrCreateCheckRun reuses a run owned by our app", async () => {
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
+    if (url.includes("/check-runs?")) {
+      return Response.json({
+        total_count: 1,
+        check_runs: [{ id: 4242, app: { id: 424242 } }],
+      });
+    }
+    return Response.json({});
+  };
+  try {
+    const id = await getOrCreateCheckRun("t", "VortexNYC/pile", "abc123", "ci", 424242);
+    assert.equal(id, 4242);
+    assert.deepEqual(calls, [
+      "GET /repos/VortexNYC/pile/commits/abc123/check-runs",
+      "PATCH /repos/VortexNYC/pile/check-runs/4242",
+    ]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
