@@ -14,10 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg \
  && echo "deb http://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update && apt-get install -y --no-install-recommends \
-    git postgresql-16 make default-jre-headless build-essential zstd \
+    git postgresql-16 make default-jre-headless build-essential zstd python3 \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL "https://go.dev/dl/go1.27.2.linux-$(dpkg --print-architecture).tar.gz" \
-    -o /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+    -o /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz \
+ && curl -fsSL "https://github.com/planetscale/cli/releases/download/v0.344.0/pscale_0.344.0_linux_$(dpkg --print-architecture).tar.gz" \
+    -o /tmp/pscale.tgz && tar -C /tmp -xzf /tmp/pscale.tgz pscale && mv /tmp/pscale /usr/local/bin/pscale && rm /tmp/pscale.tgz
 
 # trufflehog 3.97.1 — matches the version vortex's trufflehog.yml pins.
 RUN ARCH="$(dpkg --print-architecture)" && curl -fsSL \

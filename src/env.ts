@@ -11,6 +11,17 @@ export type Bindings = CiBindings & {
   // Engineering signal connector — pipeline events land in PostHog.
   POSTHOG_CI_API_KEY?: string;
   POSTHOG_CI_HOST?: string;
+  // Non-secret PlanetScale lane coordinates — scheduled branch/backup jobs
+  // interpolate these into repo commands; secrets stay in `secrets`.
+  PLANETSCALE_ORG?: string;
+  PLANETSCALE_DATABASE?: string;
+  PLANETSCALE_BASE_BRANCH?: string;
+  // Scheduled ops secrets — named here so reviewers see the fail-closed set;
+  // values are injected per-check by resolveCheckSecrets, never logged.
+  DATABASE_URL?: string;
+  PLANETSCALE_SERVICE_TOKEN_ID?: string;
+  PLANETSCALE_SERVICE_TOKEN?: string;
+  VORTEX_OPS_ALERT_WEBHOOK_URL?: string;
   ADMIN_TOKEN?: string;
   SANDBOX_LITE: DurableObjectNamespace<CiSandbox>;
   SANDBOX_HEAVY: DurableObjectNamespace<CiSandbox>;
