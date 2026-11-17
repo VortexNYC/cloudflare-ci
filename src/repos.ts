@@ -187,6 +187,43 @@ export type RepoConfig = z.infer<typeof repoConfigSchema>;
 
 const buildCommand = "pnpm exec vp run build:all";
 
+// VOR-316 — shared by the `planetscale-branch-tests` scheduled cron and its
+// /admin/dispatch lane: ephemeral PlanetScale branch smoke suite.
+const planetscaleBranchTestsCommand = `set -euo pipefail
+if [ -z "$PLANETSCALE_SERVICE_TOKEN" ] || [ -z "$PLANETSCALE_SERVICE_TOKEN_ID" ]; then
+  echo "Missing PLANETSCALE_SERVICE_TOKEN or PLANETSCALE_SERVICE_TOKEN_ID worker secret."
+  exit 1
+fi
+RUN_KEY=$(printf '%s' "$CI_RUN_KEY" | tr -cd 'a-zA-Z0-9-' | cut -c1-24)
+BRANCH_NAME="ci-$RUN_KEY"
+ROLE_NAME="ci-runner-$RUN_KEY"
+ROLE_ID=""
+cleanup() {
+  rc=$?
+  trap - EXIT
+  if [ -n "$ROLE_ID" ]; then
+    pscale role delete "$PLANETSCALE_DATABASE" "$BRANCH_NAME" "$ROLE_ID" --successor postgres --force --org "$PLANETSCALE_ORG" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$BRANCH_NAME" ]; then
+    pscale branch delete "$PLANETSCALE_DATABASE" "$BRANCH_NAME" --org "$PLANETSCALE_ORG" --force >/dev/null 2>&1 || true
+  fi
+  exit $rc
+}
+trap cleanup EXIT
+pscale branch create "$PLANETSCALE_DATABASE" "$BRANCH_NAME" --from "$PLANETSCALE_BASE_BRANCH" --org "$PLANETSCALE_ORG" --wait
+pscale role create "$PLANETSCALE_DATABASE" "$BRANCH_NAME" "$ROLE_NAME" --inherited-roles postgres --ttl 1h --org "$PLANETSCALE_ORG" --format json > /tmp/role.json
+ROLE_ID=$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync("/tmp/role.json","utf8")); process.stdout.write(String(j.id ?? ""))')
+CONNECTION_STRING=$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync("/tmp/role.json","utf8")); process.stdout.write(String(j.database_url ?? ""))')
+if [ -z "$CONNECTION_STRING" ]; then
+  echo "pscale role create returned no database_url"
+  exit 1
+fi
+export TEST_DATABASE_URL="$CONNECTION_STRING" DATABASE_URL="$CONNECTION_STRING" PAYMENTS_STORAGE_RETAIN_TEST_SCHEMAS=1 PAYMENTS_STORAGE_ALLOW_REMOTE=1
+pnpm exec vp run sdk:build
+pnpm run check
+pnpm exec vp run -F @vortexnyc/payments-storage test test/billing-catalog.test.ts test/billing-coupons.test.ts test/billing-dunning-campaigns.test.ts test/merchants-customers.test.ts test/money-path.test.ts test/onboarding-states.test.ts test/settlement-approvals.test.ts --no-file-parallelism --test-timeout=30000
+pnpm exec vp run -F @vortexnyc/worker test test/merchant-payments.test.ts test/settlement-reconcile-apply.test.ts --test-timeout=30000`;
+
 // Input-typed so schema defaults apply at getRepoConfig's parse — config
 // literals only set fields they care about.
 const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
@@ -717,40 +754,7 @@ exit "$status"`,
         // ci-planetscale.yml schedule — ephemeral branch smoke, daily.
         name: "planetscale-branch-tests",
         cron: "0 6 * * *",
-        command: `set -euo pipefail
-if [ -z "$PLANETSCALE_SERVICE_TOKEN" ] || [ -z "$PLANETSCALE_SERVICE_TOKEN_ID" ]; then
-  echo "Missing PLANETSCALE_SERVICE_TOKEN or PLANETSCALE_SERVICE_TOKEN_ID worker secret."
-  exit 1
-fi
-RUN_KEY=$(printf '%s' "$CI_RUN_KEY" | tr -cd 'a-zA-Z0-9-' | cut -c1-24)
-BRANCH_NAME="ci-$RUN_KEY"
-ROLE_NAME="ci-runner-$RUN_KEY"
-ROLE_ID=""
-cleanup() {
-  rc=$?
-  trap - EXIT
-  if [ -n "$ROLE_ID" ]; then
-    pscale role delete "$PLANETSCALE_DATABASE" "$BRANCH_NAME" "$ROLE_ID" --successor postgres --force --org "$PLANETSCALE_ORG" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$BRANCH_NAME" ]; then
-    pscale branch delete "$PLANETSCALE_DATABASE" "$BRANCH_NAME" --org "$PLANETSCALE_ORG" --force >/dev/null 2>&1 || true
-  fi
-  exit $rc
-}
-trap cleanup EXIT
-pscale branch create "$PLANETSCALE_DATABASE" "$BRANCH_NAME" --from "$PLANETSCALE_BASE_BRANCH" --org "$PLANETSCALE_ORG" --wait
-pscale role create "$PLANETSCALE_DATABASE" "$BRANCH_NAME" "$ROLE_NAME" --inherited-roles postgres --ttl 1h --org "$PLANETSCALE_ORG" --format json > /tmp/role.json
-ROLE_ID=$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync("/tmp/role.json","utf8")); process.stdout.write(String(j.id ?? ""))')
-CONNECTION_STRING=$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync("/tmp/role.json","utf8")); process.stdout.write(String(j.database_url ?? ""))')
-if [ -z "$CONNECTION_STRING" ]; then
-  echo "pscale role create returned no database_url"
-  exit 1
-fi
-export TEST_DATABASE_URL="$CONNECTION_STRING" DATABASE_URL="$CONNECTION_STRING" PAYMENTS_STORAGE_RETAIN_TEST_SCHEMAS=1 PAYMENTS_STORAGE_ALLOW_REMOTE=1
-pnpm exec vp run sdk:build
-pnpm run check
-pnpm exec vp run -F @vortexnyc/payments-storage test test/billing-catalog.test.ts test/billing-coupons.test.ts test/billing-dunning-campaigns.test.ts test/merchants-customers.test.ts test/money-path.test.ts test/onboarding-states.test.ts test/settlement-approvals.test.ts --no-file-parallelism --test-timeout=30000
-pnpm exec vp run -F @vortexnyc/worker test test/merchant-payments.test.ts test/settlement-reconcile-apply.test.ts --test-timeout=30000`,
+        command: planetscaleBranchTestsCommand,
         secrets: ["PLANETSCALE_SERVICE_TOKEN_ID", "PLANETSCALE_SERVICE_TOKEN"],
         timeoutMs: 50 * 60 * 1000,
         pool: "AUX",
@@ -1034,6 +1038,49 @@ if [ "$fail" != 0 ]; then
   exit 1
 fi`,
         timeoutMs: 40 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // ci-planetscale.yml workflow_dispatch — manual run of the same
+        // ephemeral-branch smoke the 06:00 UTC cron executes.
+        name: "planetscale-branch-tests",
+        secrets: ["PLANETSCALE_SERVICE_TOKEN_ID", "PLANETSCALE_SERVICE_TOKEN"],
+        command: planetscaleBranchTestsCommand,
+        timeoutMs: 50 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // migrate.yml — manual escape hatch applying the global and
+        // money-kernel Drizzle journals over a direct ops DATABASE_URL,
+        // then force-stamps deployed/schema-<target>. Per-target URLs:
+        // production runs on VORTEX_MIGRATE_URL; sandbox requires
+        // VORTEX_MIGRATE_SANDBOX_URL (fail closed when absent).
+        name: "migrate",
+        gitWrite: true,
+        inputs: [
+          { name: "target", required: true, choices: ["production", "sandbox"] },
+        ],
+        secrets: ["VORTEX_MIGRATE_URL"],
+        optionalSecrets: ["VORTEX_MIGRATE_SANDBOX_URL"],
+        command: `set -euo pipefail
+case "$INPUT_TARGET" in
+  sandbox) DATABASE_URL="\${VORTEX_MIGRATE_SANDBOX_URL:-}" ;;
+  *) DATABASE_URL="\${VORTEX_MIGRATE_URL:-}" ;;
+esac
+if [ -z "$DATABASE_URL" ]; then
+  echo "::error::no migrate DATABASE_URL for target $INPUT_TARGET"
+  exit 1
+fi
+export DATABASE_URL
+(cd packages/global && pnpm exec vp run db:migrate)
+pnpm --filter @vortexnyc/money-kernel db:migrate
+git config user.name "cloudflare-ci[bot]"
+git config user.email "cloudflare-ci[bot]@users.noreply.github.com"
+TAG="deployed/schema-$INPUT_TARGET"
+git tag -f "$TAG" HEAD
+git push --no-verify -f origin "refs/tags/$TAG"
+echo "Advanced $TAG -> $(git rev-parse HEAD)"`,
+        timeoutMs: 20 * 60 * 1000,
         pool: "AUX",
       },
     ],
