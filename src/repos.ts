@@ -430,7 +430,8 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       '(cd apps/docs && pnpm exec vp exec wrangler versions upload --config dist/server/wrangler.json --preview-alias "$CI_PREVIEW_ALIAS")',
     // api.vortex.nyc serves /health even during maintenance windows — a 200
     // right after deploy proves the upload serves, not just uploads.
-    verifyCommand: "curl -fsS --max-time 15 https://api.vortex.nyc/health",
+    verifyCommand:
+      "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.vortex.nyc",
     releaseRecordCommand:
       "pnpm exec vp exec tsx scripts/release-record.ts record " +
       "--out /tmp/release-record.json " +
@@ -445,7 +446,11 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     publishCommands: [
       {
         name: "publish-typescript-sdk",
-        command: "pnpm run ci:publish-sdk",
+        command:
+          "service postgresql start && " +
+          "su postgres -c \"psql -c \\\"ALTER USER postgres WITH PASSWORD 'postgres'\\\"; createdb vortex_dev\" || true; " +
+          "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/vortex_dev " +
+          "pnpm run ci:publish-sdk",
         secrets: ["NPM_TOKEN"],
       },
       {
