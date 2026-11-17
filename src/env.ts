@@ -35,6 +35,20 @@ export type Bindings = CiBindings & {
   ARTIFACTS_PUSH_TOKEN?: string;
   CLOUDFLARE_API_TOKEN?: string;
   CF_TOKEN?: string;
+  // VOR-275 — worker-money-paths-regression (vortex): injected into that
+  // check's isolated sandbox by name. CLOUDFLARE_CI_BASE_URL is the
+  // workers.dev origin of vortex-payments-ci (its hostname label is what
+  // the per-PR preview-alias substitution anchors on).
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_CI_BASE_URL?: string;
+  FINIX_SANDBOX_USERNAME?: string;
+  FINIX_SANDBOX_PASSWORD?: string;
+  // Optional smoke seeds — the repo's provisioner self-heals when absent.
+  VORTEX_SMOKE_API_KEY?: string;
+  VORTEX_SMOKE_CUSTOMER_ID?: string;
+  VORTEX_SMOKE_PAYMENT_METHOD_ID?: string;
+  FINIX_SMOKE_MERCHANT_ID?: string;
+  FINIX_SMOKE_PAYMENT_INSTRUMENT_ID?: string;
   // GitHub-side auth for the checks path. CHECKS_GITHUB_TOKEN mints
   // check-runs + reads PRs; GITHUB_WEBHOOK_SECRET verifies inbound
   // webhook signatures.
