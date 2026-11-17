@@ -78,4 +78,26 @@ export type Bindings = CiBindings & {
   ALERT_EMAIL_FROM?: string;
   ALERT_EMAIL_TO?: string;
   CI_PUBLIC_URL?: string;
+  // VOR-321 — Linear webhook relay (POST /webhook/linear). Linear can't send
+  // custom headers, so this worker verifies Linear-Signature and forwards to
+  // the Cursor automation endpoint with the bearer key. All three are
+  // secrets (the URL path is the routine's address).
+  LINEAR_WEBHOOK_SECRET?: string;
+  CURSOR_AUTOMATION_URL?: string;
+  CURSOR_AUTOMATION_KEY?: string;
 };
+
+/**
+ * Fail-loud contract for the Linear relay, scoped to its route: a missing
+ * value 503s /webhook/linear with the missing names instead of taking the
+ * whole CI worker down via the global validateEnv.
+ */
+export function missingLinearRelayEnv(env: Bindings): string[] {
+  const missing: string[] = [];
+  if (!env.LINEAR_WEBHOOK_SECRET) missing.push("LINEAR_WEBHOOK_SECRET");
+  if (!env.CURSOR_AUTOMATION_KEY) missing.push("CURSOR_AUTOMATION_KEY");
+  if (!env.CURSOR_AUTOMATION_URL) missing.push("CURSOR_AUTOMATION_URL");
+  else if (!/^https:\/\//.test(env.CURSOR_AUTOMATION_URL))
+    missing.push("CURSOR_AUTOMATION_URL (must be https)");
+  return missing;
+}

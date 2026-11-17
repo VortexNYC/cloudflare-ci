@@ -20,6 +20,7 @@ import {
 import type { Bindings } from "./env";
 import type { CiScheduler } from "./scheduler";
 import { handleDispatch } from "./dispatch";
+import { handleLinearWebhook } from "./linear-relay";
 import { logCiEvent } from "./observability";
 
 // Same sandbox runtime on a smaller container instance_type, bound as
@@ -458,6 +459,9 @@ export default {
     const { pathname } = new URL(request.url);
     if (pathname === "/webhook/github" && request.method === "POST") {
       return handleGitHubWebhook(request, env);
+    }
+    if (pathname === "/webhook/linear" && request.method === "POST") {
+      return handleLinearWebhook(request, env);
     }
     if (pathname === "/admin/artifacts" && request.method === "POST") {
       return handleAdmin(request, env);

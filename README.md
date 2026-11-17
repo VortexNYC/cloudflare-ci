@@ -48,6 +48,8 @@ myrepo: {
 
 Wire a GitHub webhook on the repo: `POST https://<your-worker>/webhook/github`, events `check_run, check_suite, merge_group, pull_request, push`, secret `GITHUB_WEBHOOK_SECRET`.
 
+Linear → Cursor relay (VOR-321): point a Linear webhook at `POST https://<your-worker>/webhook/linear`. The route verifies `Linear-Signature` (HMAC-SHA256 hex of the raw body with `LINEAR_WEBHOOK_SECRET`), rejects a `webhookTimestamp` more than 5 minutes off, then forwards the body and `Linear-*` headers to `CURSOR_AUTOMATION_URL` with `Authorization: Bearer $CURSOR_AUTOMATION_KEY` and returns the upstream status. Missing relay secrets 503 that route only.
+
 ## Secrets
 
 Nothing is committed. Required worker secrets (set with `wrangler secret put`):
@@ -59,6 +61,9 @@ Nothing is committed. Required worker secrets (set with `wrangler secret put`):
 | `CF_TOKEN` | `wrangler deploy`/`versions` calls inside containers |
 | `NPM_TOKEN` | Private-registry installs |
 | `ADMIN_TOKEN` | `/admin/*` ops routes (sweep, kill, backup) |
+| `LINEAR_WEBHOOK_SECRET` | Verifies `Linear-Signature` on `POST /webhook/linear` (VOR-321) |
+| `CURSOR_AUTOMATION_URL` | Cursor automation webhook the Linear relay forwards to (secret: the path is the routine's address) |
+| `CURSOR_AUTOMATION_KEY` | Bearer key the relay adds — Linear webhooks can't send custom headers |
 | `PILE_*`, `POSTHOG_CLI_API_KEY` | Optional repo-specific extras |
 
 `wrangler.jsonc` carries non-secret config — account ID, worker URLs, pool sizes. Update them to yours.
