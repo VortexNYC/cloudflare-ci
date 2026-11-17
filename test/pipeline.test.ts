@@ -307,6 +307,40 @@ test("Vortex main promotes sandbox, deploys, verifies, records, and publishes in
   assert.match(config?.deployCommand ?? "", /--include Dashboard\)/);
 });
 
+test("vortex promotion commands resolve vp through pnpm exec (VOR-304)", () => {
+  // `vp` is not on PATH in the deploy containers — every promotion step that
+  // shells out to vp must go through `pnpm exec vp`, like VOR-297. A bare
+  // `vp …` chunk exits 127 mid-promotion.
+  const config = getRepoConfig("vortex");
+  const promotionSteps = {
+    preDeployCommand: config?.preDeployCommand,
+    preDeployVerifyCommand: config?.preDeployVerifyCommand,
+    deployCommand: config?.deployCommand,
+    previewCommand: config?.previewCommand,
+    verifyCommand: config?.verifyCommand,
+    postDeployCommand: config?.postDeployCommand,
+    releaseRecordCommand: config?.releaseRecordCommand,
+    migrateCommand: config?.migrateCommand,
+  };
+  for (const [step, command] of Object.entries(promotionSteps)) {
+    assert.ok(command, `${step} is configured`);
+    const stripped = command.replaceAll("pnpm exec vp", "");
+    assert.doesNotMatch(
+      stripped,
+      /(^|[\s(&|;>])vp[\s'"]/,
+      `${step} invokes a bare vp — use "pnpm exec vp"`
+    );
+  }
+  // each alchemy chunk specifically goes through pnpm exec
+  for (const command of [config?.preDeployCommand, config?.deployCommand]) {
+    for (const chunk of (command ?? "").split("&&")) {
+      if (chunk.includes("alchemy deploy")) {
+        assert.match(chunk, /pnpm exec vp exec alchemy deploy/, command);
+      }
+    }
+  }
+});
+
 test("Vortex Artifacts owner/repo and refs/heads payloads still promote main", async () => {
   const { env } = makeEnv();
   const { step } = makeStep();
