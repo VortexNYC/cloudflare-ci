@@ -27,6 +27,10 @@ const QUEUE_ADMIT_ATTEMPTS = 45;
 const QUEUE_ADMIT_MIN_DELAY_MS = 5_000;
 const QUEUE_ADMIT_MAX_DELAY_MS = 60_000;
 const SCHEDULED_ALERT_DEDUPE_MS = 6 * 60 * 60_000;
+// How often an in-flight check re-reads its newest-wins claim. Short
+// enough that a superseded run wastes seconds, long enough that the DO
+// read load is trivial. Tests override via CHECKS_SUPERSEDE_POLL_MS.
+const SUPERSEDE_POLL_MS = 15_000;
 
 export interface ChecksParams extends CheckTarget {
   /** Optional subset of checks to run — defaults to all configured. */
@@ -131,7 +135,16 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           (await fetchPrHeadRepoName(token, repo, prNumber)) === repo
       );
     }
-    const runnable = checks.filter((c) => !c.sameRepoOnly || sameRepoPr);
+    // Draft PRs run the fast lane only (format, lint, secret scan). The
+    // rest of the suite still gets a check-run completed neutral — a
+    // required context left unposted hangs the merge, and a fake green
+    // would hide real work. Marking ready_for_review refires the
+    // pull_request event with draft unset, which runs everything.
+    const draftPr = event.payload.draft === true;
+    const draftSkipped = draftPr ? checks.filter((c) => !c.fast) : [];
+    const runnable = checks.filter(
+      (c) => (!c.sameRepoOnly || sameRepoPr) && (!draftPr || c.fast)
+    );
     // Confirmed fork: these checks still need a check-run completed as
     // neutral — a required context left unposted hangs the merge.
     const forkSkipped = checks.filter((c) => c.sameRepoOnly && !sameRepoPr);
@@ -280,6 +293,21 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         })
       );
     }
+    for (const c of draftSkipped) {
+      if (forkSkipped.includes(c)) continue;
+      const runId = runIds[c.name];
+      if (runId === undefined) continue;
+      await step.do(`skip-draft-${c.name}`, () =>
+        completeCheckRun(token, repo, runId, {
+          conclusion: "neutral",
+          title: `${c.name} skipped (draft)`,
+          summary:
+            "Draft pull request — only the fast checks (format, lint, " +
+            "secret scan) run on drafts. This check runs when the PR is " +
+            "marked ready for review or enters the merge queue.",
+        })
+      );
+    }
     if (runnable.length === 0) {
       await withScheduler("complete-aux-wf", (stub) =>
         stub.completeAuxWorkflow("checks", repo, sha, event.instanceId)
@@ -288,14 +316,18 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
     }
 
     // Merge-queue refs are per-group and immutable — superseding only
-    // makes sense on real branch refs (pull_request / check_suite).
+    // makes sense on real PR branch refs (pull_request / check_suite).
+    // Never on main: a rerequested suite there must run to completion.
     const queueKey =
-      headRef && !headRef.includes("gh-readonly-queue/") ? headRef : null;
+      headRef && !headRef.includes("gh-readonly-queue/") && headRef !== "main"
+        ? headRef
+        : null;
 
     // Newest-wins claim on (repo, ref): a check run that ends up queued
     // for a pool slot reads this back and cancels itself when a newer
     // push took the branch — a stale run that kept polling would burn a
-    // container on a dead commit.
+    // container on a dead commit. The same claim also feeds the
+    // in-flight supersede watch below.
     if (queueKey) {
       await withScheduler("dedupe-checkclaim", (stub) =>
         stub.claimCheck(
@@ -307,6 +339,49 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         )
       );
     }
+
+    // In-flight supersede watch: the claim check during admission only
+    // covers runs still queued for a slot — a running check on a stale
+    // sha used to burn its container to completion. While a sandbox runs,
+    // re-read the claim on a poll; a newer push on the same PR ref makes
+    // the run report superseded and the `finally` destroys the sandbox,
+    // which is the actual cancellation. Unarmed on main, merge-queue
+    // refs, and the scheduled/dispatch lanes (queueKey is null for all
+    // of them) — those runs always finish.
+    const supersedePollMs =
+      Number(
+        (this.env as unknown as Record<string, unknown>)
+          .CHECKS_SUPERSEDE_POLL_MS
+      ) || SUPERSEDE_POLL_MS;
+    const runWithSupersedeWatch = async (
+      run: () => Promise<ChecksRunResult>
+    ): Promise<ChecksRunResult | "superseded"> => {
+      if (!queueKey) return await run();
+      let finished = false;
+      const runPromise = run();
+      // The superseded path returns without awaiting runPromise — never
+      // let its late rejection go unhandled.
+      runPromise.catch(() => {});
+      const watched = await Promise.race([
+        runPromise.then(() => ({ kind: "result" as const })),
+        (async () => {
+          while (!finished) {
+            await new Promise((r) => setTimeout(r, supersedePollMs));
+            if (finished) return { kind: "poll-ended" as const };
+            const claim = await scheduler()
+              .getCheckClaim(repo, queueKey)
+              .catch(() => null);
+            if (claim && claim.sha !== sha) {
+              return { kind: "superseded" as const };
+            }
+          }
+          return { kind: "poll-ended" as const };
+        })(),
+      ]);
+      finished = true;
+      if (watched.kind === "superseded") return "superseded";
+      return await runPromise;
+    };
 
     // `isolated` checks always take their own ChecksSandbox — a long live
     // gate (worker-money-paths-regression) must never sit inside the
@@ -503,7 +578,8 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 }
                 const sandbox = this.env.CHECKS_SANDBOX.getByName(slotName);
                 try {
-                  const run = await sandbox.runCheck({
+                  const run = await runWithSupersedeWatch(() =>
+                    sandbox.runCheck({
                     checkoutScript: buildCheckoutScript(event.payload),
                     script: buildRunScript(config, serialChecks),
                     env: {
@@ -516,7 +592,19 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                     cacheRepo: config.checksInstallCommand
                       ? repo.split("/")[1]
                       : undefined,
-                  });
+                    })
+                  );
+                  if (run === "superseded") {
+                    return serialChecks.map((c) => ({
+                      name: c.name,
+                      superseded: true,
+                      metric: {
+                        repo, sha, job: c.name, waitMs: serialWaitMs,
+                        setupMs: 0, runMs: 0,
+                        result: "superseded" as const, prNumber, ref: headRef,
+                      },
+                    }));
+                  }
                   const parsed = parseRunOutput(run);
                   const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
                   const metricFor = (check: (typeof serialChecks)[number]): CheckMetric => ({
@@ -574,20 +662,33 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             async (): Promise<CheckResult[]> => {
               const sandbox = this.env.CHECKS_SANDBOX.getByName(slotName);
               try {
-                const run = await sandbox.runCheck({
-                  checkoutScript: buildCheckoutScript(event.payload),
-                  script: buildRunScript(config, serialChecks),
-                  env: {
-                    GITHUB_TOKEN: token,
-                    NPM_TOKEN: this.env.NPM_TOKEN ?? "",
-                    PR_BODY: prBody,
-                    CI: "true",
-                  },
-                  timeoutSec: 85 * 60,
-                  cacheRepo: config.checksInstallCommand
-                    ? repo.split("/")[1]
-                    : undefined,
-                });
+                const run = await runWithSupersedeWatch(() =>
+                  sandbox.runCheck({
+                    checkoutScript: buildCheckoutScript(event.payload),
+                    script: buildRunScript(config, serialChecks),
+                    env: {
+                      GITHUB_TOKEN: token,
+                      NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+                      PR_BODY: prBody,
+                      CI: "true",
+                    },
+                    timeoutSec: 85 * 60,
+                    cacheRepo: config.checksInstallCommand
+                      ? repo.split("/")[1]
+                      : undefined,
+                  })
+                );
+                if (run === "superseded") {
+                  return serialChecks.map((c) => ({
+                    name: c.name,
+                    superseded: true,
+                    metric: {
+                      repo, sha, job: c.name, waitMs: serialWaitMs,
+                      setupMs: 0, runMs: 0,
+                      result: "superseded" as const, prNumber, ref: headRef,
+                    },
+                  }));
+                }
                 const parsed = parseRunOutput(run);
                 const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
                 const metricFor = (check: (typeof serialChecks)[number]): CheckMetric => ({
@@ -795,7 +896,8 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               // install can't eat its budget. The store cache (a
               // DirectoryBackup on the R2 binding) keys off the lockfile
               // hash — the DO computes it after checkout.
-              const run = await sandbox.runCheck({
+              const run = await runWithSupersedeWatch(() =>
+                sandbox.runCheck({
                 checkoutScript: buildCheckoutScript(event.payload),
                 script: buildRunScript(config, [check]),
                 env: logOnly
@@ -821,7 +923,19 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                   config.checksInstallCommand && check.needsInstall !== false
                     ? repo.split("/")[1]
                     : undefined,
-              });
+                })
+              );
+              if (run === "superseded") {
+                return {
+                  name: check.name,
+                  superseded: true,
+                  metric: {
+                    repo, sha, job: check.name, waitMs,
+                    setupMs: 0, runMs: 0,
+                    result: "superseded", prNumber, ref: headRef,
+                  },
+                };
+              }
               const parsed = parseRunOutput(run);
               const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
               const metricFor = (result: CheckMetric["result"]): CheckMetric => ({
@@ -979,6 +1093,7 @@ interface CheckShape {
   optionalSecrets?: string[];
   isolated?: boolean;
   sameRepoOnly?: boolean;
+  fast?: boolean;
 }
 
 function checkSecretsOf(env: Bindings, check: CheckShape): Record<string, string> {

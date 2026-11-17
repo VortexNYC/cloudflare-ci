@@ -11,6 +11,9 @@ export interface CheckTarget {
   baseSha?: string;
   /** pull_request.base.ref — the PR's target branch (e.g. "main"). */
   baseRef?: string;
+  /** pull_request.draft — drafts run only `fast` checks; ready_for_review
+   *  arrives with draft=false and fires the full suite. */
+  draft?: boolean;
   /** PR body/title edit — only checks that consume the PR body should re-run. */
   edited?: boolean;
   /** check_run.rerequested — re-run only this check name, not the whole set. */
@@ -97,6 +100,7 @@ export function parseCheckEvent(
           ? pr.base.ref
           : undefined,
       ...(action === "edited" ? { edited: true } : {}),
+      ...(pr.draft === true ? { draft: true } : {}),
     };
   }
 
