@@ -89,7 +89,15 @@
         ]
       }
     ],
-    "crons": ["*/15 * * * *", "*/30 * * * *"]
+    "crons": [
+      "*/15 * * * *",
+      "*/30 * * * *",
+      "7 * * * *",
+      "0 */6 * * *",
+      "0 15 * * *",
+      "0 9 * * 1",
+      "0 6 * * *"
+    ]
   },
   "workflows": [
     {
@@ -156,7 +164,10 @@
     // substitutes a per-PR preview-alias onto. Public config, not a secret.
     "CLOUDFLARE_CI_BASE_URL": "https://vortex-payments-ci.vortex-nyc.workers.dev",
     "ALERT_EMAIL_FROM": "Cloudflare CI <noreply@veil.nyc>",
-    "ALERT_EMAIL_TO": "shlomo@vortex.nyc"
+    "ALERT_EMAIL_TO": "shlomo@vortex.nyc",
+    "PLANETSCALE_ORG": "vortex-nyc",
+    "PLANETSCALE_DATABASE": "vortex",
+    "PLANETSCALE_BASE_BRANCH": "main"
   },
   "send_email": [
     {

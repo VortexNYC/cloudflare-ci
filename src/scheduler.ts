@@ -232,6 +232,15 @@ export class CiScheduler extends DurableObject<Bindings> {
     await this.ctx.storage.delete(`resv/${name}`);
   }
 
+  /** Atomic alert dedupe — one page per key per window, persisted in the DO. */
+  async alertDue(key: string, windowMs: number): Promise<boolean> {
+    const storageKey = `alert/dedupe/${key}`;
+    const last = await this.ctx.storage.get<number>(storageKey);
+    if (last !== undefined && Date.now() - last < windowMs) return false;
+    await this.ctx.storage.put(storageKey, Date.now());
+    return true;
+  }
+
   /**
    * Atomic newest-wins claim per repo+branch. Returns false when the branch's
    * sha already completed — duplicate events arrive minutes late and would
@@ -325,6 +334,7 @@ export class CiScheduler extends DurableObject<Bindings> {
     repo: string;
     sha: string;
     branch?: string;
+    scope?: string;
   }): string {
     const repoKey = input.repo.toLowerCase().replace(/[^a-z0-9-]/g, "-");
     const shaKey = input.sha.slice(0, 10);
@@ -332,7 +342,12 @@ export class CiScheduler extends DurableObject<Bindings> {
       const branchKey = input.branch.toLowerCase().replace(/[^a-z0-9-]/g, "-");
       return `wrefire/mirror/${repoKey}/${shaKey}/${branchKey}`;
     }
-    return `wrefire/${input.kind}/${repoKey}/${shaKey}`;
+    const scopeKey = input.scope
+      ?.toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-");
+    return scopeKey
+      ? `wrefire/${input.kind}/${repoKey}/${shaKey}/${scopeKey}`
+      : `wrefire/${input.kind}/${repoKey}/${shaKey}`;
   }
 
   /** Register a checks/mirror workflow for infra refire — not used for deploy claims. */
@@ -341,6 +356,7 @@ export class CiScheduler extends DurableObject<Bindings> {
     repo: string;
     sha: string;
     branch?: string;
+    scope?: string;
     instanceId: string;
     params: unknown;
   }): Promise<void> {
@@ -364,9 +380,10 @@ export class CiScheduler extends DurableObject<Bindings> {
     repo: string,
     sha: string,
     instanceId: string,
-    branch?: string
+    branch?: string,
+    scope?: string
   ): Promise<void> {
-    const key = this.auxWorkflowStorageKey({ kind, repo, sha, branch });
+    const key = this.auxWorkflowStorageKey({ kind, repo, sha, branch, scope });
     const existing = await this.ctx.storage.get<AuxWorkflowClaim>(key);
     if (existing?.instanceId !== instanceId) return;
     await this.ctx.storage.put(key, {
@@ -403,14 +420,16 @@ export class CiScheduler extends DurableObject<Bindings> {
         "-"
       );
     }
+    const params = claim.params as
+      | { scheduled?: boolean; scheduledKey?: string; checkNames?: string[] }
+      | undefined;
+    if (claim.kind === "checks" && params?.scheduled && typeof params.scheduledKey === "string") {
+      return `${params.scheduledKey}-refire-${n}`.replace(/[^a-z0-9-]/g, "-");
+    }
     const rerun =
       claim.kind === "checks" &&
-      claim.params &&
-      typeof claim.params === "object" &&
-      "checkNames" in claim.params &&
-      Array.isArray((claim.params as { checkNames?: string[] }).checkNames) &&
-      (claim.params as { checkNames?: string[] }).checkNames?.length === 1
-        ? `-rerun-${(claim.params as { checkNames: string[] }).checkNames[0]}`
+      params?.checkNames?.length === 1
+        ? `-rerun-${params.checkNames[0]}`
         : "";
     return `checks-${repoKey}-${shaKey}${rerun}-refire-${n}`
       .toLowerCase()

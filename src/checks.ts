@@ -19,6 +19,10 @@ export interface CheckTarget {
   mirrorRef?: string;
   /** refs/tags/* pushes → ReleaseWorkflow (cli-binary replacement). */
   tag?: string;
+  /** Cron-dispatched scheduled suite — selects scheduledChecks, not PR checks. */
+  scheduled?: boolean;
+  /** Stable idempotency/scope key for a scheduled dispatch (also its workflow id). */
+  scheduledKey?: string;
 }
 
 /** Verify X-Hub-Signature-256 against the raw body — HMAC-SHA256 hex. */
@@ -332,6 +336,41 @@ export async function fetchPrBody(
     `/repos/${repo}/pulls/${prNumber}`
   )) as Json;
   return str(res.body) ?? "";
+}
+
+/** Resolve the GitHub credential checks/scheduled dispatch should use. */
+export async function getChecksGitHubToken(
+  env: {
+    CHECKS_GITHUB_TOKEN?: string;
+    GITHUB_APP_ID?: string;
+    GITHUB_APP_PRIVATE_KEY?: string;
+  },
+  repo: string
+): Promise<string | undefined> {
+  if (env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY) {
+    return await getInstallationToken(
+      env.GITHUB_APP_ID,
+      env.GITHUB_APP_PRIVATE_KEY,
+      repo
+    ).catch(() => env.CHECKS_GITHUB_TOKEN);
+  }
+  return env.CHECKS_GITHUB_TOKEN;
+}
+
+/** Resolve a branch/ref to the commit sha scheduled checks should target. */
+export async function getCommitSha(
+  token: string,
+  repo: string,
+  ref = "main"
+): Promise<string> {
+  const res = (await githubApi(
+    token,
+    "GET",
+    `/repos/${repo}/commits/${encodeURIComponent(ref)}`
+  )) as Json;
+  const sha = str(res.sha);
+  if (!sha) throw new Error(`GitHub commit lookup for ${repo}@${ref} gave no sha`);
+  return sha;
 }
 
 /** GitHub App → installation access token. OAuth user tokens can't create

@@ -4,8 +4,18 @@ import { getSandbox } from "@cloudflare/sandbox";
 import { CI } from "./ci";
 import { ChecksWorkflow } from "./checks-workflow";
 import { ChecksSandbox } from "./checks-sandbox";
-import { parseCheckEvent, verifyGitHubSignature } from "./checks";
-import { getRepoConfig } from "./repos";
+import {
+  getChecksGitHubToken,
+  getCommitSha,
+  parseCheckEvent,
+  verifyGitHubSignature,
+} from "./checks";
+import { getRepoConfig, getScheduledJobsForCron } from "./repos";
+import {
+  isWorkflowAlreadyExists,
+  scheduledScopeFor,
+  scheduledWorkflowId,
+} from "./scheduled";
 import type { Bindings } from "./env";
 import type { CiScheduler } from "./scheduler";
 import { logCiEvent } from "./observability";
@@ -504,10 +514,79 @@ export default {
     validateEnv(env);
     ctx.waitUntil(
       (async () => {
+        let jobs: ReturnType<typeof getScheduledJobsForCron> = [];
+        try {
+          jobs = getScheduledJobsForCron(event.cron);
+        } catch (err) {
+          await logCiEvent(env, "ci.scheduled.dispatch_failed", {
+            cron: event.cron,
+            error: String(err),
+          });
+        }
+        for (const job of jobs) {
+          try {
+            const token = await getChecksGitHubToken(env, job.repo);
+            if (!token) {
+              await logCiEvent(env, "ci.scheduled.no_github_token", {
+                repo: job.repo,
+                cron: event.cron,
+                checks: job.checkNames,
+              });
+              continue;
+            }
+            const sha = await getCommitSha(token, job.repo, "main");
+            const scheduledKey = scheduledScopeFor(job, event.scheduledTime);
+            const id = scheduledWorkflowId(scheduledKey);
+            await env.CHECKS_WORKFLOW.create({
+              id,
+              params: {
+                repo: job.repo,
+                sha,
+                scheduled: true,
+                scheduledKey,
+                checkNames: job.checkNames,
+              },
+            })
+              .then(() =>
+                logCiEvent(env, "ci.scheduled.dispatched", {
+                  repo: job.repo,
+                  sha,
+                  cron: event.cron,
+                  checks: job.checkNames,
+                  workflowId: id,
+                })
+              )
+              .catch(async (err: unknown) => {
+                if (isWorkflowAlreadyExists(err)) {
+                  await logCiEvent(env, "ci.scheduled.duplicate", {
+                    repo: job.repo,
+                    cron: event.cron,
+                    workflowId: id,
+                  });
+                  return;
+                }
+                await logCiEvent(env, "ci.scheduled.dispatch_failed", {
+                  repo: job.repo,
+                  cron: event.cron,
+                  error: String(err),
+                });
+              });
+          } catch (err) {
+            await logCiEvent(env, "ci.scheduled.dispatch_failed", {
+              repo: job.repo,
+              cron: event.cron,
+              checks: job.checkNames,
+              error: String(err),
+            });
+          }
+        }
         if (event.cron === "*/30 * * * *") {
           await env.CANARY_WORKFLOW.create({ id: `canary-${Date.now()}`, params: {} });
           return;
         }
+        // Dedicated schedule ticks dispatch and stop; the existing */15 tick
+        // also keeps the ledger sweep it already owned.
+        if (jobs.length > 0 && event.cron !== "*/15 * * * *") return;
         const results = await scheduler(env).sweep();
         const poolUse = (pool: string) =>
           results.reservations.filter((r) => r.pool === pool).length;

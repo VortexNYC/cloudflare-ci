@@ -1,5 +1,40 @@
 import { z } from "zod";
 
+const checkSchema = z.object({
+  name: z.string(),
+  command: z.string(),
+  env: z.record(z.string()).default({}),
+  timeoutMs: z.number().optional(),
+  // Check consumes PR_BODY (e.g. the "No tests:" escape hatch) —
+  // pull_request.edited events re-run only these, not the whole set.
+  usesPrBody: z.boolean().default(false),
+  // False for checks that run image binaries or plain shell (gitleaks,
+  // prc) — skips checksInstallCommand so the sandbox goes straight to
+  // the check instead of a full monorepo install (VTX-809).
+  needsInstall: z.boolean().default(true),
+  // Named worker secrets injected into the check process env — never into
+  // the script text. Missing required names fail the check closed.
+  secrets: z.array(z.string()).default([]),
+  optionalSecrets: z.array(z.string()).default([]),
+  // True runs the check in its own ChecksSandbox even when the repo is
+  // `serial` — a long live gate must not serialize behind the fast suite.
+  isolated: z.boolean().default(false),
+  // PR gates carrying secrets must never execute fork code: the workflow
+  // verifies the PR's head repo before any sandbox spawns and skips the
+  // check entirely on a mismatch (same contract as the old GHA `if:` guard).
+  sameRepoOnly: z.boolean().default(false),
+  // Scheduled ops lanes stay off the PR CHECKS pool so a daily regression
+  // can't starve merge checks; webhook checks default to CHECKS.
+  pool: z.enum(["CHECKS", "AUX"]).default("CHECKS"),
+  // Scheduled-only failure alert cadence (deduped through the scheduler DO).
+  alertEveryMs: z.number().int().positive().optional(),
+});
+
+const scheduledCheckSchema = checkSchema.extend({
+  // Wrangler cron expression this check answers — index.ts dispatches on it.
+  cron: z.string(),
+});
+
 const repoConfigSchema = z.object({
   name: z.string(),
   buildEnv: z.record(z.string()).default({}),
@@ -70,36 +105,11 @@ const repoConfigSchema = z.object({
   // after `checksInstallCommand`; env carries per-check vars (e.g.
   // DIFF_COVERAGE_BASE). Check `name` is the check-run name branch
   // protection expects.
-  checks: z
-    .array(
-      z.object({
-        name: z.string(),
-        command: z.string(),
-        env: z.record(z.string()).default({}),
-        timeoutMs: z.number().optional(),
-        // Check consumes PR_BODY (e.g. the "No tests:" escape hatch) —
-        // pull_request.edited events re-run only these, not the whole set.
-        usesPrBody: z.boolean().default(false),
-        // False for checks that run image binaries or plain shell (gitleaks,
-        // prc) — skips checksInstallCommand so the sandbox goes straight to
-        // the check instead of a full monorepo install (VTX-809).
-        needsInstall: z.boolean().default(true),
-        // Named Worker secrets/vars injected into the check sandbox env —
-        // names only; values never appear in config or output. A check's
-        // own guard fails closed on a name that isn't bound.
-        secrets: z.array(z.string()).default([]),
-        // True runs the check in its own ChecksSandbox even when the repo
-        // is `serial` — a long live gate must not serialize behind (or
-        // block) the fast suite.
-        isolated: z.boolean().default(false),
-        // PR gates carrying secrets must never execute fork code: the
-        // workflow verifies the PR's head repo before any sandbox spawns
-        // and skips the check entirely on a mismatch (same contract as
-        // the old GHA `if:` guard — no context posted on forks).
-        sameRepoOnly: z.boolean().default(false),
-      })
-    )
-    .default([]),
+  checks: z.array(checkSchema).default([]),
+  // Cron replacements for former GitHub Actions schedules. These are not
+  // merge checks: dispatch resolves the default-branch sha and runs the
+  // named suite as GitHub check runs on that commit.
+  scheduledChecks: z.array(scheduledCheckSchema).default([]),
   // Per-repo install run once before checks (pnpm install, go mod download).
   checksInstallCommand: z.string().optional(),
   // When true (default), each check gets its own container — lowest wall clock.
@@ -521,6 +531,172 @@ done
 [ "\$fail" = 0 ] || { echo "::error::One or more money paths failed on the PR Worker"; exit 1; }`,
       },
     ],
+    scheduledChecks: [
+      {
+        // synthetic-monitor.yml — between-deploys probe of the prod API.
+        name: "synthetic-monitor",
+        cron: "*/15 * * * *",
+        command:
+          "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.vortex.nyc",
+        timeoutMs: 5 * 60 * 1000,
+        pool: "AUX",
+        alertEveryMs: 30 * 60 * 1000,
+      },
+      {
+        // drift-check.yml — money-path leading indicators against prod.
+        name: "money-path-drift",
+        cron: "7 * * * *",
+        command:
+          "pnpm exec vp exec tsx scripts/money-path-drift-check.cli.ts",
+        secrets: ["DATABASE_URL"],
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // planetscale-backup.yml — newest successful main backup must be fresh.
+        name: "planetscale-backup",
+        cron: "0 */6 * * *",
+        command: `set -eo pipefail
+if [ -z "$PLANETSCALE_SERVICE_TOKEN" ] || [ -z "$PLANETSCALE_SERVICE_TOKEN_ID" ]; then
+  echo "Missing PLANETSCALE_SERVICE_TOKEN or PLANETSCALE_SERVICE_TOKEN_ID worker secret."
+  exit 1
+fi
+set +e
+pscale backup list "$PLANETSCALE_DATABASE" "$PLANETSCALE_BASE_BRANCH" --org "$PLANETSCALE_ORG" --format json > /tmp/planetscale-backups.json 2> /tmp/planetscale-backups-stderr.txt
+pscale_status=$?
+set -e
+if [ "$pscale_status" -ne 0 ]; then
+  cat /tmp/planetscale-backups-stderr.txt >&2 || true
+  cat /tmp/planetscale-backups.json >&2 || true
+  printf '{"ok":false,"reason":"pscale backup list exited %s"}\\n' "$pscale_status" > /tmp/planetscale-backup-proof.json
+  status=1
+else
+  if pnpm exec vp exec tsx scripts/gate-planetscale-backup.ts /tmp/planetscale-backups.json > /tmp/planetscale-backup-proof.json 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  cat /tmp/planetscale-backup-proof.json
+fi
+if [ "$status" -ne 0 ] && [ -n "$VORTEX_OPS_ALERT_WEBHOOK_URL" ]; then
+  curl --fail --show-error --silent -H "content-type: application/json" --data-binary @/tmp/planetscale-backup-proof.json "$VORTEX_OPS_ALERT_WEBHOOK_URL" || true
+fi
+exit "$status"`,
+        secrets: ["PLANETSCALE_SERVICE_TOKEN_ID", "PLANETSCALE_SERVICE_TOKEN"],
+        optionalSecrets: ["VORTEX_OPS_ALERT_WEBHOOK_URL"],
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // production-readiness.yml job 1 — chuanjin pr scan, weekly.
+        name: "production-readiness",
+        cron: "0 9 * * 1",
+        command: "bash production-readiness/run.sh",
+        needsInstall: false,
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // production-readiness.yml job 2 — MarinJursic prc scan, weekly.
+        // Distinct name from the PR check so a scheduled run never reopens
+        // the merge-gate check run on the same sha.
+        name: "production-readiness-prc",
+        cron: "0 9 * * 1",
+        command: "bash production-readiness/prc.sh",
+        needsInstall: false,
+        timeoutMs: 15 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // ci-planetscale.yml schedule — ephemeral branch smoke, daily.
+        name: "planetscale-branch-tests",
+        cron: "0 6 * * *",
+        command: `set -euo pipefail
+if [ -z "$PLANETSCALE_SERVICE_TOKEN" ] || [ -z "$PLANETSCALE_SERVICE_TOKEN_ID" ]; then
+  echo "Missing PLANETSCALE_SERVICE_TOKEN or PLANETSCALE_SERVICE_TOKEN_ID worker secret."
+  exit 1
+fi
+RUN_KEY=$(printf '%s' "$CI_RUN_KEY" | tr -cd 'a-zA-Z0-9-' | cut -c1-24)
+BRANCH_NAME="ci-$RUN_KEY"
+ROLE_NAME="ci-runner-$RUN_KEY"
+ROLE_ID=""
+cleanup() {
+  rc=$?
+  trap - EXIT
+  if [ -n "$ROLE_ID" ]; then
+    pscale role delete "$PLANETSCALE_DATABASE" "$BRANCH_NAME" "$ROLE_ID" --successor postgres --force --org "$PLANETSCALE_ORG" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$BRANCH_NAME" ]; then
+    pscale branch delete "$PLANETSCALE_DATABASE" "$BRANCH_NAME" --org "$PLANETSCALE_ORG" --force >/dev/null 2>&1 || true
+  fi
+  exit $rc
+}
+trap cleanup EXIT
+pscale branch create "$PLANETSCALE_DATABASE" "$BRANCH_NAME" --from "$PLANETSCALE_BASE_BRANCH" --org "$PLANETSCALE_ORG" --wait
+pscale role create "$PLANETSCALE_DATABASE" "$BRANCH_NAME" "$ROLE_NAME" --inherited-roles postgres --ttl 1h --org "$PLANETSCALE_ORG" --format json > /tmp/role.json
+ROLE_ID=$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync("/tmp/role.json","utf8")); process.stdout.write(String(j.id ?? ""))')
+CONNECTION_STRING=$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync("/tmp/role.json","utf8")); process.stdout.write(String(j.database_url ?? ""))')
+if [ -z "$CONNECTION_STRING" ]; then
+  echo "pscale role create returned no database_url"
+  exit 1
+fi
+export TEST_DATABASE_URL="$CONNECTION_STRING" DATABASE_URL="$CONNECTION_STRING" PAYMENTS_STORAGE_RETAIN_TEST_SCHEMAS=1 PAYMENTS_STORAGE_ALLOW_REMOTE=1
+pnpm exec vp run sdk:build
+pnpm run check
+pnpm exec vp run -F @vortexnyc/payments-storage test test/billing-catalog.test.ts test/billing-coupons.test.ts test/billing-dunning-campaigns.test.ts test/merchants-customers.test.ts test/money-path.test.ts test/onboarding-states.test.ts test/settlement-approvals.test.ts --no-file-parallelism --test-timeout=30000
+pnpm exec vp run -F @vortexnyc/worker test test/merchant-payments.test.ts test/settlement-reconcile-apply.test.ts --test-timeout=30000`,
+        secrets: ["PLANETSCALE_SERVICE_TOKEN_ID", "PLANETSCALE_SERVICE_TOKEN"],
+        timeoutMs: 50 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // launch-regression.yml — broader daily wall on an ephemeral branch.
+        name: "launch-regression",
+        cron: "0 15 * * *",
+        command: `set -euo pipefail
+if [ -z "$PLANETSCALE_SERVICE_TOKEN" ] || [ -z "$PLANETSCALE_SERVICE_TOKEN_ID" ]; then
+  echo "Missing PLANETSCALE_SERVICE_TOKEN or PLANETSCALE_SERVICE_TOKEN_ID worker secret."
+  exit 1
+fi
+RUN_KEY=$(printf '%s' "$CI_RUN_KEY" | tr -cd 'a-zA-Z0-9-' | cut -c1-24)
+BRANCH_NAME="lr-$RUN_KEY"
+ROLE_NAME="lr-runner-$RUN_KEY"
+ROLE_ID=""
+cleanup() {
+  rc=$?
+  trap - EXIT
+  if [ -n "$ROLE_ID" ]; then
+    pscale role delete "$PLANETSCALE_DATABASE" "$BRANCH_NAME" "$ROLE_ID" --successor postgres --force --org "$PLANETSCALE_ORG" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$BRANCH_NAME" ]; then
+    pscale branch delete "$PLANETSCALE_DATABASE" "$BRANCH_NAME" --org "$PLANETSCALE_ORG" --force >/dev/null 2>&1 || true
+  fi
+  exit $rc
+}
+trap cleanup EXIT
+pscale branch create "$PLANETSCALE_DATABASE" "$BRANCH_NAME" --from "$PLANETSCALE_BASE_BRANCH" --org "$PLANETSCALE_ORG" --wait
+pscale role create "$PLANETSCALE_DATABASE" "$BRANCH_NAME" "$ROLE_NAME" --inherited-roles postgres --ttl 2h --org "$PLANETSCALE_ORG" --format json > /tmp/role.json
+ROLE_ID=$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync("/tmp/role.json","utf8")); process.stdout.write(String(j.id ?? ""))')
+CONNECTION_STRING=$(node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync("/tmp/role.json","utf8")); process.stdout.write(String(j.database_url ?? ""))')
+if [ -z "$CONNECTION_STRING" ]; then
+  echo "pscale role create returned no database_url"
+  exit 1
+fi
+export TEST_DATABASE_URL="$CONNECTION_STRING" DATABASE_URL="$CONNECTION_STRING" PAYMENTS_STORAGE_RETAIN_TEST_SCHEMAS=1 PAYMENTS_STORAGE_ALLOW_REMOTE=1
+pnpm run check
+pnpm run openapi:http-api:verify
+pnpm run spec-mirror:verify
+python3 scripts/verify-query-coverage.py
+python3 scripts/verify-payload-coverage.py && python3 scripts/verify-payload-strictness.py
+pnpm run openapi:http-api
+git diff --exit-code docs/openapi/vortex-http-api.generated.json
+pnpm exec vp run -F @vortexnyc/payments-storage test --no-file-parallelism --test-timeout=30000
+pnpm exec vp run -F @vortexnyc/worker test --no-file-parallelism --test-timeout=30000`,
+        secrets: ["PLANETSCALE_SERVICE_TOKEN_ID", "PLANETSCALE_SERVICE_TOKEN"],
+        timeoutMs: 60 * 60 * 1000,
+        pool: "AUX",
+      },
+    ],
   },
   veil: {
     name: "veil",
@@ -622,4 +798,25 @@ export function getRepoConfig(repoName: unknown): RepoConfig | undefined {
   for (const check of merged.checks ?? []) byName.set(check.name, check);
   merged.checks = [...byName.values()];
   return repoConfigSchema.parse(merged);
+}
+
+export interface ScheduledJobGroup {
+  repo: string;
+  checkNames: string[];
+}
+
+/** Cron → repo check suite. One workflow per repo+cron keeps weekly jobs
+ *  (production-readiness has two scans) in a single dispatch. */
+export function getScheduledJobsForCron(cron: string): ScheduledJobGroup[] {
+  const jobs: ScheduledJobGroup[] = [];
+  for (const repoName of repoNameSchema.options) {
+    const config = getRepoConfig(repoName);
+    const checkNames = (config?.scheduledChecks ?? [])
+      .filter((check) => check.cron === cron)
+      .map((check) => check.name);
+    if (checkNames.length > 0) {
+      jobs.push({ repo: `VortexNYC/${repoName}`, checkNames });
+    }
+  }
+  return jobs;
 }

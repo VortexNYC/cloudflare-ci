@@ -48,6 +48,8 @@ export interface ChecksRunOptions {
   env: Record<string, string>;
   /** GNU-timeout bound on the install+check script, in seconds. */
   timeoutSec: number;
+  /** Env for the checkout exec only. Secrets belong in env, not here. */
+  checkoutEnv?: Record<string, string>;
   /** Repo short name for the store-cache key; absent disables caching. */
   cacheRepo?: string;
 }
@@ -213,7 +215,7 @@ export class ChecksSandbox extends DurableObject<Bindings> {
       CHECKOUT_SCRIPT_PATH,
       opts.checkoutScript,
       CHECKOUT_TIMEOUT_SEC,
-      opts.env
+      opts.checkoutEnv ?? opts.env
     );
     // Seed the pnpm store from the previous run with the same lockfile, then
     // run install+check, then publish the fresh store when install succeeded
