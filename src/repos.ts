@@ -79,6 +79,8 @@ const repoConfigSchema = z.object({
   // Automated migrations for non-D1 databases (e.g. vortex PlanetScale) —
   // runs on the build snapshot so drizzle-kit resolves from node_modules.
   // Secrets arrive via migrateSecrets; interpolate them into env, not argv.
+  // Promotion can be shipped independently while the migration lane is gated.
+  migrateOnPromotion: z.boolean().default(true),
   // VTX-603: tag-push releases — refs/tags/* on a repo with releaseCommand
   // dispatches ReleaseWorkflow (build + publish inside a ChecksSandbox).
   releaseCommand: z.string().optional(),
@@ -438,16 +440,18 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include LandingSandbox) && " +
       "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include ElementCdnSandbox)",
     preDeployVerifyCommand:
-      "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.sandbox.vortex.nyc",
+      "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.sandbox.vortex.nyc && " +
+      "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://app.sandbox.vortex.nyc --spa",
     migrateCommand:
       'DATABASE_URL="$VORTEX_MIGRATE_URL" pnpm --filter @vortexnyc/money-kernel db:migrate',
     migrateSecrets: ["VORTEX_MIGRATE_URL"],
-    // Every worker in the monorepo ships on main after the sandbox gate and
-    // production migration.
+    migrateOnPromotion: false,
+    // Every worker in the monorepo ships on main after the sandbox gate.
+    // PlanetScale migration remains a separately gated lane for now.
     deployCommand:
       "SKIP_MIGRATE=1 bash scripts/deploy-worker.sh && " +
       "(cd packages/global && pnpm exec vp exec wrangler deploy) && " +
-      "(cd apps/dashboard && pnpm exec vp exec wrangler deploy) && " +
+      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage production --no-input --yes --include Dashboard) && " +
       "(cd apps/landing && pnpm exec vp exec wrangler deploy) && " +
       "(cd apps/docs && pnpm exec vp exec wrangler deploy --config dist/server/wrangler.json) && " +
       "(cd apps/element-cdn && pnpm exec vp exec wrangler deploy) && " +
@@ -463,7 +467,8 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     // right after deploy proves the upload serves, not just uploads.
     verifyCommand: "curl -fsS --max-time 15 https://api.vortex.nyc/health",
     postDeployCommand:
-      "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.vortex.nyc",
+      "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.vortex.nyc && " +
+      "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://app.vortex.nyc --spa",
     releaseRecordCommand:
       "pnpm exec vp exec tsx scripts/release-record.ts record " +
       "--out /tmp/release-record.json " +
