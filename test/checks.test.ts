@@ -238,6 +238,8 @@ test("buildRunScript wraps timeoutMs checks in GNU timeout, others plain", () =>
     { name: "unbounded", command: "pnpm lint" },
   ]);
   assert.match(script, /timeout --kill-after=10 600 bash -c 'pnpm test' > \/tmp\/check-bounded\.out/);
+  assert.match(script, /install_started=\$\(date \+%s%3N\)/);
+  assert.match(script, /check_ms=\$\(\( \$\(date \+%s%3N\) - check_started \)\)/);
   assert.match(script, /^bash -c 'pnpm lint' > \/tmp\/check-unbounded\.out 2>&1$/m);
 });
 

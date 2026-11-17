@@ -98,6 +98,7 @@
       "0 9 * * 1",
       "0 6 * * *"
     ]
+
   },
   "workflows": [
     {
@@ -179,6 +180,12 @@
     "enabled": true,
     "logs": {
       "enabled": true
+    }
+  },
+  "analytics_engine_datasets": [
+    {
+      "binding": "CI_METRICS",
+      "dataset": "ci_metrics"
     }
   }
 }

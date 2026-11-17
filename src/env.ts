@@ -3,6 +3,7 @@ import type { ChecksSandbox } from "./checks-sandbox";
 import type { CiScheduler } from "./scheduler";
 
 export type Bindings = CiBindings & {
+  CI_METRICS?: AnalyticsEngineDataset;
   NPM_TOKEN: string;
   // D1-scoped token for the migrate step; CF_TOKEN stays workers+containers.
   CF_TOKEN_MIGRATE?: string;

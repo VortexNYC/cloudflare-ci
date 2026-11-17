@@ -66,6 +66,26 @@ export function resolveCheckSecrets(
   return { values, missing: [...missing] };
 }
 
+export interface CheckMetric {
+  repo: string;
+  sha: string;
+  job: string;
+  waitMs: number;
+  setupMs: number;
+  runMs: number;
+  result: "success" | "failure" | "cancelled" | "superseded";
+  prNumber?: number;
+  ref?: string;
+}
+
+function writeCheckMetric(env: Bindings, metric: CheckMetric): void {
+  env.CI_METRICS?.writeDataPoint({
+    indexes: ["check", metric.repo, metric.job, metric.result, metric.ref ?? "unknown"],
+    doubles: [metric.waitMs, metric.setupMs, metric.runMs, metric.prNumber ?? 0],
+    blobs: [metric.sha],
+  });
+}
+
 export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
   override async run(event: WorkflowEvent<ChecksParams>, step: WorkflowStep) {
     const { repo, sha, prNumber, headRef } = event.payload;
@@ -271,6 +291,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
 
       if (useSerial) {
         const slotName = `${sandboxId}-all`;
+        const serialWaitStarted = Date.now();
         const attemptAdmit = async (): Promise<
           | { state: "admitted" }
           | { state: "superseded" }
@@ -398,6 +419,19 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                       : undefined,
                   });
                   const parsed = parseRunOutput(run);
+                  const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
+                  for (const check of checks) {
+                    const out = parsed.checks[check.name];
+                    writeCheckMetric(this.env, {
+                      repo, sha, job: check.name,
+                      waitMs: Date.now() - serialWaitStarted,
+                      setupMs, runMs: run.checkMs[check.name] ?? 0,
+                      result: parsed.checkoutRc !== 0 || parsed.installRc !== 0
+                        ? "failure"
+                        : out?.rc === 0 ? "success" : "failure",
+                      prNumber, ref: headRef,
+                    });
+                  }
                   warnIfOvercommitDenied(parsed, repo);
                   if (parsed.checkoutRc !== 0) {
                     const err = `Checkout failed: ${parsed.output.slice(-2000)}`;
@@ -459,6 +493,19 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                     : undefined,
                 });
                 const parsed = parseRunOutput(run);
+                const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
+                for (const check of checks) {
+                  const out = parsed.checks[check.name];
+                  writeCheckMetric(this.env, {
+                    repo, sha, job: check.name,
+                    waitMs: Date.now() - serialWaitStarted,
+                    setupMs, runMs: run.checkMs[check.name] ?? 0,
+                    result: parsed.checkoutRc !== 0 || parsed.installRc !== 0
+                      ? "failure"
+                      : out?.rc === 0 ? "success" : "failure",
+                    prNumber, ref: headRef,
+                  });
+                }
                 warnIfOvercommitDenied(parsed, repo);
                 if (parsed.checkoutRc !== 0) {
                   const err = `Checkout failed: ${parsed.output.slice(-2000)}`;
@@ -494,6 +541,8 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         check: (typeof runnable)[number]
       ): Promise<CheckResult> => {
         const checkSandboxId = `${sandboxId}-${check.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
+        const waitStarted = Date.now();
+        let waitMs = 0;
         const attemptAdmit = async (): Promise<
           | { state: "admitted" }
           | { state: "superseded" }
@@ -522,6 +571,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           attemptAdmit
         );
         if (first.state === "superseded") {
+          writeCheckMetric(this.env, {
+            repo, sha, job: check.name, waitMs: Date.now() - waitStarted,
+            setupMs: 0, runMs: 0, result: "superseded", prNumber, ref: headRef,
+          });
           return { name: check.name, superseded: true };
         }
         if (first.state === "denied") {
@@ -568,6 +621,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             // failure, not a check stuck queued forever.
             .catch((): "capacity" => "capacity");
           if (waited === "superseded") {
+            writeCheckMetric(this.env, {
+              repo, sha, job: check.name, waitMs: Date.now() - waitStarted,
+              setupMs: 0, runMs: 0, result: "superseded", prNumber, ref: headRef,
+            });
             return { name: check.name, superseded: true };
           }
           if (waited === "capacity") {
@@ -575,6 +632,10 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               repo,
               sha,
               check: check.name,
+            });
+            writeCheckMetric(this.env, {
+              repo, sha, job: check.name, waitMs: Date.now() - waitStarted,
+              setupMs: 0, runMs: 0, result: "failure", prNumber, ref: headRef,
             });
             return {
               name: check.name,
@@ -599,6 +660,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 ).catch(() => {})
           );
         }
+        waitMs = Date.now() - waitStarted;
 
         // Check-declared secrets: names are looked up on this Worker's
         // env and injected into the sandbox — an unbound name lands as
@@ -650,20 +712,35 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                     : undefined,
               });
               const parsed = parseRunOutput(run);
+              const setupMs = run.checkoutMs + run.restoreMs + run.installMs;
               warnIfOvercommitDenied(parsed, repo);
               if (parsed.checkoutRc !== 0) {
+                writeCheckMetric(this.env, {
+                  repo, sha, job: check.name, waitMs, setupMs,
+                  runMs: 0, result: "failure", prNumber, ref: headRef,
+                });
                 return {
                   name: check.name,
                   error: `Checkout failed: ${scrub(parsed.output).slice(-2000)}`,
                 };
               }
               if (parsed.installRc !== 0) {
+                writeCheckMetric(this.env, {
+                  repo, sha, job: check.name, waitMs, setupMs,
+                  runMs: 0, result: "failure", prNumber, ref: headRef,
+                });
                 return {
                   name: check.name,
                   error: `Install failed: ${scrub(parsed.output).slice(-2000)}`,
                 };
               }
               const out = parsed.checks[check.name];
+              writeCheckMetric(this.env, {
+                repo, sha, job: check.name, waitMs, setupMs,
+                runMs: run.checkMs[check.name] ?? 0,
+                result: out?.rc === 0 ? "success" : "failure",
+                prNumber, ref: headRef,
+              });
               return {
                 name: check.name,
                 ok: out?.rc === 0,
@@ -919,9 +996,12 @@ export function buildRunScript(
       // The sentinel tells ChecksSandbox the store is worth backing up —
       // seed/upload themselves live in the DO, not the script.
       'mkdir -p /tmp/.pnpm-store',
+      "install_started=$(date +%s%3N)",
       `{ ${config.checksInstallCommand}; } > /tmp/install.out 2>&1`,
       "rc=$?",
       "tail -c 3500 /tmp/install.out",
+      "install_ms=$(( $(date +%s%3N) - install_started ))",
+      "echo ===CI:INSTALL:MS=$install_ms===",
       "echo ===CI:INSTALL:RC=$rc===",
       '[ "$rc" = "0" ] && touch /tmp/.install-ok'
     );
@@ -944,7 +1024,9 @@ export function buildRunScript(
     // stdout and verbose suites (go test) eat the whole budget. Emit a
     // bounded tail between markers instead.
     lines.push(
+      "check_started=$(date +%s%3N)",
       `${invocation} > ${outFile} 2>&1`,
+      `check_ms=$(( $(date +%s%3N) - check_started )); echo ===CHECK:${check.name}:MS=$check_ms===`,
       `rc=$?; echo ===CHECK:${check.name}:START===`,
       `tail -c 3500 ${outFile}`,
       `echo ===CHECK:${check.name}:RC=$rc===`
