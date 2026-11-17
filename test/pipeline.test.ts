@@ -277,7 +277,7 @@ test("Vortex PR/preview runs never reach promotion, release, or publication", as
   assert.equal(ci.ran.some((name) => name.startsWith("publish-")), false);
 });
 
-test("Vortex main promotes sandbox, migrates, deploys, verifies, records, and publishes in order", async () => {
+test("Vortex main promotes sandbox, deploys, verifies, records, and publishes in order", async () => {
   const { env } = makeEnv();
   const { step } = makeStep();
   const ci = makeCi({ releaseRecordSha: "7b0148ab" });
@@ -294,7 +294,6 @@ test("Vortex main promotes sandbox, migrates, deploys, verifies, records, and pu
     "build",
     "sandbox-deploy",
     "sandbox-verify",
-    "migrate",
     "deploy",
     "verify",
     "post-deploy-smoke",
@@ -302,6 +301,24 @@ test("Vortex main promotes sandbox, migrates, deploys, verifies, records, and pu
     "publish-typescript-sdk",
     "publish-python-sdk",
   ]);
+  const config = getRepoConfig("vortex");
+  assert.match(config?.preDeployVerifyCommand ?? "", /app\.sandbox\.vortex\.nyc --spa/);
+  assert.match(config?.postDeployCommand ?? "", /app\.vortex\.nyc --spa/);
+  assert.match(config?.deployCommand ?? "", /--include Dashboard\)/);
+});
+
+test("Vortex Artifacts owner/repo and refs/heads payloads still promote main", async () => {
+  const { env } = makeEnv();
+  const { step } = makeStep();
+  const ci = makeCi({ releaseRecordSha: "7b0148ab" });
+  const event = makeEvent("refs/heads/main", "7b0148ab", "inst-1", "VortexNYC/vortex");
+  event.payload.branch = "refs/heads/main";
+
+  await runPipeline(env, step, ci, event);
+
+  assert.equal(ci.ran.includes("sandbox-deploy"), true);
+  assert.equal(ci.ran.includes("deploy"), true);
+  assert.equal(ci.ran.includes("migrate"), false);
 });
 
 test("Go publication has no long-lived secret binding and skips without App credentials", async () => {

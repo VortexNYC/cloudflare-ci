@@ -153,8 +153,15 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     step: WorkflowStep,
     ci: CiContext
   ): Promise<void> {
-    const repo = _event.payload.repo;
-    const branch = _event.payload.branch;
+    // Artifacts events identify a repo by its short name, but older event
+    // payloads and replayed events may carry owner/repo or refs/heads/*.
+    // Normalize at the boundary so the repo registry and main-only gate see
+    // the same values for every Artifacts event shape.
+    const repo = String(_event.payload.repo).split("/").pop() ?? "";
+    const branch = String(_event.payload.branch ?? "").replace(
+      /^refs\/heads\//,
+      ""
+    );
     const config = getRepoConfig(repo);
 
     // Checks-only repos (no build/deploy yet) ride the checks workflow —
@@ -377,7 +384,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       });
     }
 
-    if (config.migrateCommand) {
+    if (config.migrateCommand && config.migrateOnPromotion) {
       // Non-D1 migrations (PlanetScale etc.) run on the build snapshot —
       // the migrate tool resolves from node_modules. Migrate-only repos
       // fall back to the deps snapshot.
