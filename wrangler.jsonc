@@ -21,8 +21,10 @@
     {
       // Light pool for steps that don't install dependencies (e.g. D1
       // migrations): a quarter vCPU / 1 GiB is plenty for a wrangler CLI call.
+      // basic caps image size at 4000MB — the shared ./Dockerfile is ~4373MB,
+      // so this pool gets the slim ./Dockerfile.lite (VOR-281).
       "class_name": "CiSandboxLite",
-      "image": "./Dockerfile",
+      "image": "./Dockerfile.lite",
       "max_instances": 10,
       "instance_type": "basic"
     },
