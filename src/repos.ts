@@ -28,11 +28,30 @@ const checkSchema = z.object({
   pool: z.enum(["CHECKS", "AUX"]).default("CHECKS"),
   // Scheduled-only failure alert cadence (deduped through the scheduler DO).
   alertEveryMs: z.number().int().positive().optional(),
+  // Check pushes to GitHub (ops tags, branches) — the dispatch workflow
+  // mints a contents:write installation token for it instead of the
+  // checks:write read-only default.
+  gitWrite: z.boolean().default(false),
 });
 
 const scheduledCheckSchema = checkSchema.extend({
   // Wrangler cron expression this check answers — index.ts dispatches on it.
   cron: z.string(),
+});
+
+const dispatchInputSchema = z.object({
+  name: z.string().regex(/^[a-z][a-z0-9_]*$/),
+  required: z.boolean().default(false),
+  choices: z.array(z.string()).optional(),
+});
+
+// workflow_dispatch replacements: named operator runs triggered through
+// POST /admin/dispatch (Bearer ADMIN_TOKEN). Inputs are declared up front —
+// the endpoint rejects undeclared names, missing required values, and
+// values outside `choices`, then the workflow exposes each as INPUT_<NAME>
+// in the check's env (same shape as GitHub's inputs.* context).
+const dispatchCheckSchema = checkSchema.extend({
+  inputs: z.array(dispatchInputSchema).default([]),
 });
 
 const repoConfigSchema = z.object({
@@ -117,6 +136,10 @@ const repoConfigSchema = z.object({
   // merge checks: dispatch resolves the default-branch sha and runs the
   // named suite as GitHub check runs on that commit.
   scheduledChecks: z.array(scheduledCheckSchema).default([]),
+  // Operator workflow_dispatch lanes — triggered via POST /admin/dispatch
+  // on main's head sha. Same log+alert path as scheduledChecks: no GitHub
+  // check-runs, deduped ops alerts on failure.
+  dispatchChecks: z.array(dispatchCheckSchema).default([]),
   // Per-repo install run once before checks (pnpm install, go mod download).
   checksInstallCommand: z.string().optional(),
   // When true (default), each check gets its own container — lowest wall clock.
@@ -762,6 +785,240 @@ pnpm exec vp run -F @vortexnyc/payments-storage test --no-file-parallelism --tes
 pnpm exec vp run -F @vortexnyc/worker test --no-file-parallelism --test-timeout=30000`,
         secrets: ["PLANETSCALE_SERVICE_TOKEN_ID", "PLANETSCALE_SERVICE_TOKEN"],
         timeoutMs: 60 * 60 * 1000,
+        pool: "AUX",
+      },
+    ],
+    // VOR-278 — the manual workflow_dispatch operator lanes. Commands are
+    // the GHA bodies verbatim; `environment` inputs map to the GitHub
+    // environment-scoped jobs they replaced ("all" runs both sequentially).
+    dispatchChecks: [
+      {
+        // deploy-lock.yml — stamps ops/deploy-locked-<env> annotated tags.
+        name: "deploy-lock",
+        gitWrite: true,
+        inputs: [
+          { name: "environment", required: true, choices: ["production", "sandbox", "all"] },
+          { name: "reason", required: true },
+        ],
+        command: `set -euo pipefail
+git fetch --force origin "refs/tags/ops/*:refs/tags/ops/*" || true
+git config user.name "cloudflare-ci[bot]"
+git config user.email "cloudflare-ci[bot]@users.noreply.github.com"
+pnpm exec vp exec tsx scripts/gate-stamp-deploy-lock.cli.ts \\
+  --environment "$INPUT_ENVIRONMENT" \\
+  --reason "$INPUT_REASON"`,
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // deploy-unlock.yml — deletes ops/deploy-locked-<env> tags.
+        name: "deploy-unlock",
+        gitWrite: true,
+        inputs: [
+          { name: "environment", required: true, choices: ["production", "sandbox", "all"] },
+        ],
+        command: `set -euo pipefail
+git fetch --force origin "refs/tags/ops/*:refs/tags/ops/*" || true
+git config user.name "cloudflare-ci[bot]"
+git config user.email "cloudflare-ci[bot]@users.noreply.github.com"
+pnpm exec vp exec tsx scripts/gate-stamp-deploy-lock.cli.ts \\
+  --environment "$INPUT_ENVIRONMENT" \\
+  --unlock`,
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // disable-charging.yml — sets AUTH_KV payments:charging_disabled.
+        name: "disable-charging",
+        inputs: [
+          { name: "environment", required: true, choices: ["production", "sandbox", "all"] },
+        ],
+        secrets: ["CF_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+        command: `set -euo pipefail
+export CLOUDFLARE_API_TOKEN="$CF_TOKEN"
+for E in production sandbox; do
+  case "$INPUT_ENVIRONMENT" in "$E"|all)
+    pnpm exec vp exec tsx scripts/set-charging-mode.cli.ts \\
+      --environment "$E" --enable ;;
+  esac
+done`,
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // enable-charging.yml — clears payments:charging_disabled.
+        name: "enable-charging",
+        inputs: [
+          { name: "environment", required: true, choices: ["production", "sandbox", "all"] },
+        ],
+        secrets: ["CF_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+        command: `set -euo pipefail
+export CLOUDFLARE_API_TOKEN="$CF_TOKEN"
+for E in production sandbox; do
+  case "$INPUT_ENVIRONMENT" in "$E"|all)
+    pnpm exec vp exec tsx scripts/set-charging-mode.cli.ts \\
+      --environment "$E" --disable ;;
+  esac
+done`,
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // disable-maintenance.yml — clears AUTH_KV payments:maintenance.
+        name: "disable-maintenance",
+        inputs: [
+          { name: "environment", required: true, choices: ["production", "sandbox", "all"] },
+        ],
+        secrets: ["CF_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+        command: `set -euo pipefail
+export CLOUDFLARE_API_TOKEN="$CF_TOKEN"
+for E in production sandbox; do
+  case "$INPUT_ENVIRONMENT" in "$E"|all)
+    pnpm exec vp exec tsx scripts/set-maintenance-mode.cli.ts \\
+      --environment "$E" --disable ;;
+  esac
+done`,
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // enable-maintenance.yml — sets AUTH_KV payments:maintenance.
+        name: "enable-maintenance",
+        inputs: [
+          { name: "environment", required: true, choices: ["production", "sandbox", "all"] },
+        ],
+        secrets: ["CF_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+        command: `set -euo pipefail
+export CLOUDFLARE_API_TOKEN="$CF_TOKEN"
+for E in production sandbox; do
+  case "$INPUT_ENVIRONMENT" in "$E"|all)
+    pnpm exec vp exec tsx scripts/set-maintenance-mode.cli.ts \\
+      --environment "$E" --enable ;;
+  esac
+done`,
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // feature-flag.yml — flips a registry flag over AUTH_KV.
+        name: "feature-flag",
+        inputs: [
+          { name: "environment", required: true, choices: ["production", "sandbox", "all"] },
+          { name: "flag", required: true, choices: ["split_transfers", "platform_buyer_reuse"] },
+          { name: "state", required: true, choices: ["on", "off"] },
+        ],
+        secrets: ["CF_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+        command: `set -euo pipefail
+export CLOUDFLARE_API_TOKEN="$CF_TOKEN"
+for E in production sandbox; do
+  case "$INPUT_ENVIRONMENT" in "$E"|all)
+    pnpm exec vp exec tsx scripts/set-feature-flag.cli.ts \\
+      --environment "$E" \\
+      --flag "$INPUT_FLAG" \\
+      --"$INPUT_STATE" ;;
+  esac
+done`,
+        timeoutMs: 10 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // rollback-worker.yml — wrangler rollback promotes a previous
+        // version; no Alchemy reconcile, no tag moves. Image wrangler is
+        // used directly, so no repo install.
+        name: "rollback-worker",
+        needsInstall: false,
+        inputs: [
+          { name: "environment", required: true, choices: ["production", "sandbox"] },
+          { name: "version_id", required: false },
+          { name: "message", required: false },
+        ],
+        secrets: ["CF_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+        command: `set -euo pipefail
+export CLOUDFLARE_API_TOKEN="$CF_TOKEN"
+case "$INPUT_ENVIRONMENT" in
+  sandbox) WORKER_NAME=vortex-sandbox ;;
+  *) WORKER_NAME=vortex ;;
+esac
+MESSAGE="\${INPUT_MESSAGE:-Emergency rollback via cloudflare-ci}"
+echo "=== deployments status (before) ==="
+wrangler --name "$WORKER_NAME" deployments status
+echo "=== recent deployments ==="
+wrangler --name "$WORKER_NAME" deployments list
+if [ -n "\${INPUT_VERSION_ID:-}" ]; then
+  wrangler --name "$WORKER_NAME" rollback "$INPUT_VERSION_ID" --yes --message "$MESSAGE"
+else
+  wrangler --name "$WORKER_NAME" rollback --yes --message "$MESSAGE"
+fi
+echo "=== deployments status (after) ==="
+wrangler --name "$WORKER_NAME" deployments status`,
+        timeoutMs: 15 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // seed-alchemy-state.yml — one --adopt per stage. `environment`
+        // selected the GitHub env holding the token; the Worker's CF_TOKEN
+        // is the single credential now, so only the stage matters.
+        name: "seed-alchemy-state",
+        inputs: [
+          { name: "stage", required: true, choices: ["ci", "sandbox", "production"] },
+          { name: "include", required: true },
+        ],
+        secrets: ["CF_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+        command: `set -euo pipefail
+export CLOUDFLARE_API_TOKEN="$CF_TOKEN"
+ADOPT="--adopt"
+if [ "$INPUT_INCLUDE" = "CiToken" ]; then
+  ADOPT=""
+fi
+pnpm exec vp exec alchemy deploy scripts/alchemy/run.ts \\
+  --stage "$INPUT_STAGE" \\
+  --no-input \\
+  --yes \\
+  $ADOPT \\
+  --include "$INPUT_INCLUDE"`,
+        timeoutMs: 30 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // finix-microdeposit-proof.yml — live sandbox microdeposit
+        // lifecycle proof; the JSON record lands in the run log (the GHA
+        // artifact upload has no CI equivalent).
+        name: "finix-microdeposit-proof",
+        env: { FINIX_SMOKE_ENV: "sandbox" },
+        secrets: ["FINIX_SANDBOX_USERNAME", "FINIX_SANDBOX_PASSWORD"],
+        command:
+          "pnpm exec vp exec tsx scripts/smoke-finix-microdeposit.ts",
+        timeoutMs: 25 * 60 * 1000,
+        pool: "AUX",
+      },
+      {
+        // finix-sandbox-proofs.yml — certification suite + settlement
+        // reconcile against real Finix sandbox, accumulator not fail-fast.
+        name: "finix-sandbox-proofs",
+        env: {
+          FINIX_SMOKE_ENV: "sandbox",
+          FINIX_CERT_PROOF_ONBOARDING: "false",
+          FINIX_CERT_PROOF_FEE_PROFILE: "false",
+          FINIX_CERT_PROOF_MERCHANT_FEE_PROFILE_ASSIGNMENT: "true",
+          FINIX_CERT_PROOF_PLATFORM_FEE: "true",
+          FINIX_CERT_PROOF_PAYOUT: "false",
+          FINIX_CERT_PROOF_DISPUTE_TRIGGER: "false",
+        },
+        secrets: [
+          "FINIX_SANDBOX_USERNAME",
+          "FINIX_SANDBOX_PASSWORD",
+          "FINIX_SMOKE_MERCHANT_ID",
+          "FINIX_SMOKE_PAYMENT_INSTRUMENT_ID",
+        ],
+        command: `set -uo pipefail
+fail=0
+pnpm exec vp exec tsx packages/payments-provider/scripts/finix-certification-proof-suite.ts || fail=1
+pnpm exec vp exec tsx packages/payments-provider/scripts/finix-smoke-settlement-reconcile.ts || fail=1
+if [ "$fail" != 0 ]; then
+  echo "::error::One or more live sandbox proofs failed"
+  exit 1
+fi`,
+        timeoutMs: 40 * 60 * 1000,
         pool: "AUX",
       },
     ],

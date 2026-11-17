@@ -117,6 +117,11 @@ against cloudflare's repo when there's bandwidth.
 - `POST /admin/sandbox/kill` `{name}` — destroy one sandbox on all pools.
 - `POST /admin/sandbox/sweep` — reap reservations >60min; returns the live
   ledger. Runs unattended hourly via cron (`17 * * * *`).
+- `POST /admin/dispatch` `{repo, check, inputs?, ref?}` — the
+  workflow_dispatch replacement (VOR-278). Runs a repo's declared
+  `dispatchChecks` entry on the ref's head sha in the same log+alert lane
+  as scheduled checks; failures email + file a Pile issue. Operator inputs
+  land as `INPUT_<NAME>` env.
 - All admin routes: `Authorization: Bearer $ADMIN_TOKEN`, timing-safe.
 - **`ARTIFACTS_ACCOUNT_ID` secret** must match `CLOUDFLARE_ACCOUNT_ID`
   (`953346ce…`). A stale Vortex-old value mirrors into a dead namespace while

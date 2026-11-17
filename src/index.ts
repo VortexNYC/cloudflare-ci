@@ -13,11 +13,13 @@ import {
 import { getRepoConfig, getScheduledJobsForCron } from "./repos";
 import {
   isWorkflowAlreadyExists,
+  safe,
   scheduledScopeFor,
   scheduledWorkflowId,
 } from "./scheduled";
 import type { Bindings } from "./env";
 import type { CiScheduler } from "./scheduler";
+import { handleDispatch } from "./dispatch";
 import { logCiEvent } from "./observability";
 
 // Same sandbox runtime on a smaller container instance_type, bound as
@@ -504,6 +506,11 @@ export default {
     // cloudflare-ci-drill workers, not real prod.
     if (pathname === "/admin/drill" && request.method === "POST") {
       return handleDrill(request, env);
+    }
+    // Operator workflow_dispatch replacement (VOR-278): POST {repo, check,
+    // inputs} runs a declared dispatch check on the repo's main/ref head.
+    if (pathname === "/admin/dispatch" && request.method === "POST") {
+      return handleDispatch(request, env, timingSafeEqual);
     }
     if (pathname.startsWith("/admin/")) {
       return new Response("Not Found", { status: 404 });

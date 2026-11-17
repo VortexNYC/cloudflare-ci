@@ -23,6 +23,10 @@ export interface CheckTarget {
   scheduled?: boolean;
   /** Stable idempotency/scope key for a scheduled dispatch (also its workflow id). */
   scheduledKey?: string;
+  /** POST /admin/dispatch run — selects dispatchChecks, carries operator inputs. */
+  dispatch?: boolean;
+  /** Operator inputs from the dispatch request — exposed as INPUT_<NAME>. */
+  inputs?: Record<string, string>;
 }
 
 /** Verify X-Hub-Signature-256 against the raw body — HMAC-SHA256 hex. */
