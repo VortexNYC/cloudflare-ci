@@ -10,6 +10,7 @@ import {
   fetchPrBody,
   fetchPrHeadRepoName,
   getChecksGitHubToken,
+  getInstallationToken,
   type CheckTarget,
 } from "./checks";
 import { sendOpsAlert } from "./alerts";
@@ -75,14 +76,21 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       console.log(`[checks] skipping ${repo}: no config or no GitHub creds`);
       return;
     }
-    const sourceChecks = event.payload.scheduled
-      ? config.scheduledChecks
-      : config.checks;
+    // Dispatch runs ride the scheduled lane: no GitHub check-runs, the
+    // same aux tracking / pool accounting, and deduped ops alerts on
+    // failure — the only difference is which check list they select.
+    const isDispatch = event.payload.dispatch === true;
+    const logOnly = event.payload.scheduled === true || isDispatch;
+    const sourceChecks = isDispatch
+      ? config.dispatchChecks
+      : event.payload.scheduled
+        ? config.scheduledChecks
+        : config.checks;
     const checks = sourceChecks.filter(
       (c) => !event.payload.checkNames || event.payload.checkNames.includes(c.name)
     );
     if (checks.length === 0) return;
-    const scheduledScope = event.payload.scheduled
+    const scheduledScope = logOnly
       ? (event.payload.scheduledKey ?? `scheduled-${repo}-${sha.slice(0, 10)}`)
       : undefined;
 
@@ -120,7 +128,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         () => fn(scheduler())
       );
 
-    if (event.payload.scheduled) {
+    if (logOnly) {
       const secretResolution = resolveCheckSecrets(this.env, checks);
       if (secretResolution.missing.length > 0) {
         const missing = secretResolution.missing;
@@ -140,7 +148,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             this.env,
             "Scheduled checks not configured",
             [
-              "cloudflare-ci scheduled checks are not configured on this Worker.",
+              `cloudflare-ci ${isDispatch ? "dispatch" : "scheduled"} checks are not configured on this Worker.`,
               `- repo: ${repo}`,
               `- checks: ${checks.map((c) => c.name).join(", ")}`,
               `- missing secrets: ${missing.join(", ")}`,
@@ -148,6 +156,53 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           ).catch(() => {});
         }
         return;
+      }
+    }
+
+    // Dispatch checks that push to GitHub (ops/deploy-locked-* tags) need
+    // contents:write — the checks token only carries contents:read. Mint a
+    // scoped installation token when the App creds exist; otherwise the
+    // run keeps CHECKS_GITHUB_TOKEN (a PAT deploy may have write anyway).
+    let gitToken = token;
+    if (isDispatch && checks.some((c) => c.gitWrite)) {
+      gitToken = await step
+        .do(
+          "mint-write-token",
+          {
+            retries: { limit: 3, delay: 5_000, backoff: "linear" },
+            timeout: 60_000,
+          },
+          async () => {
+            if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_PRIVATE_KEY) {
+              return token;
+            }
+            return await getInstallationToken(
+              this.env.GITHUB_APP_ID,
+              this.env.GITHUB_APP_PRIVATE_KEY,
+              repo,
+              {
+                permissions: {
+                  checks: "write",
+                  contents: "write",
+                  pull_requests: "read",
+                },
+              }
+            );
+          }
+        )
+        .catch(() => token);
+    }
+
+    // Declared operator inputs → INPUT_<NAME> env in the check process,
+    // the same surface GitHub's inputs.* context gave the old workflows.
+    const inputEnv: Record<string, string> = {};
+    if (isDispatch) {
+      for (const c of config.dispatchChecks) {
+        if (!checks.includes(c)) continue;
+        for (const input of c.inputs) {
+          const key = `INPUT_${input.name.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`;
+          inputEnv[key] = event.payload.inputs?.[input.name] ?? "";
+        }
       }
     }
 
@@ -170,8 +225,8 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
     // duplicate context per check name.
     const runIds = await step.do("create-check-runs", async () => {
       const ids: Record<string, number> = {};
-      // Scheduled lanes are log+alert only — never mint check-runs on main.
-      if (event.payload.scheduled) return ids;
+      // Scheduled + dispatch lanes are log+alert only — never mint check-runs on main.
+      if (logOnly) return ids;
       for (const c of checks) {
         ids[c.name] = await getOrCreateCheckRun(token, repo, sha, c.name);
       }
@@ -241,7 +296,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       // the named worker secrets (DATABASE_URL, PlanetScale tokens). The
       // stable run key names ephemeral PlanetScale branches deterministically.
       const checkoutEnv = {
-        GITHUB_TOKEN: token,
+        GITHUB_TOKEN: gitToken,
         NPM_TOKEN: this.env.NPM_TOKEN ?? "",
         PR_BODY: prBody,
         CI: "true",
@@ -313,7 +368,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           });
           for (const c of serialChecks) {
             await step.do(`queued-${c.name}`, () =>
-              event.payload.scheduled
+              logOnly
                 ? Promise.resolve()
                 : updateCheckRunStatus(token, repo, runIds[c.name]!, "queued", {
                     title: `${c.name} queued`,
@@ -371,7 +426,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 timeout: 90 * MINUTE,
               },
               async (): Promise<CheckResult[]> => {
-                if (!event.payload.scheduled) {
+                if (!logOnly) {
                   for (const c of serialChecks) {
                     await updateCheckRunStatus(
                       token,
@@ -425,7 +480,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         } else {
           for (const c of serialChecks) {
             await step.do(`start-${c.name}`, () =>
-              event.payload.scheduled
+              logOnly
                 ? Promise.resolve()
                 : updateCheckRunStatus(
                     token,
@@ -535,7 +590,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           // for a slot inside the workflow instead of failing the check
           // (an author used to have to push an empty commit to retrigger).
           await step.do(`queued-${check.name}`, () =>
-            event.payload.scheduled
+            logOnly
               ? Promise.resolve()
               : updateCheckRunStatus(token, repo, runIds[check.name]!, "queued", {
                   title: `${check.name} queued`,
@@ -589,7 +644,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             check: check.name,
           });
           await step.do(`start-${check.name}`, () =>
-            event.payload.scheduled
+            logOnly
               ? Promise.resolve()
               : updateCheckRunStatus(
                   token,
@@ -626,11 +681,12 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               const run = await sandbox.runCheck({
                 checkoutScript: buildCheckoutScript(event.payload),
                 script: buildRunScript(config, [check]),
-                env: event.payload.scheduled
+                env: logOnly
                   ? {
                       ...checkoutEnv,
                       PR_NUMBER: String(prNumber ?? ""),
                       REPO: repo,
+                      ...inputEnv,
                       ...checkSecrets,
                     }
                   : {
@@ -642,7 +698,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                       CI: "true",
                       ...checkSecrets,
                     },
-                checkoutEnv: event.payload.scheduled ? checkoutEnv : undefined,
+                checkoutEnv: logOnly ? checkoutEnv : undefined,
                 timeoutSec: 75 * 60,
                 cacheRepo:
                   config.checksInstallCommand && check.needsInstall !== false
@@ -693,7 +749,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       results = [...(results ?? []), ...parallelResults];
 
       for (const r of results) {
-        if (event.payload.scheduled) continue;
+        if (logOnly) continue;
         await step.do(`report-${r.name}`, () => {
           if (r.superseded) {
             return completeCheckRun(token, repo, runIds[r.name]!, {
@@ -718,7 +774,8 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         });
       }
 
-      if (event.payload.scheduled) {
+      if (logOnly) {
+        const runKind = isDispatch ? "Dispatch" : "Scheduled";
         const failed = results.filter(
           (r) => !r.superseded && (r.error !== undefined || r.ok !== true)
         );
@@ -734,9 +791,9 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               const detail = (r.error ?? r.output ?? "(no output)").slice(-3500);
               await sendOpsAlert(
                 this.env,
-                `Scheduled ${r.name} failed`,
+                `${runKind} ${r.name} failed`,
                 [
-                  `cloudflare-ci scheduled check failed`,
+                  `cloudflare-ci ${runKind.toLowerCase()} check failed`,
                   `- repo: ${repo}`,
                   `- sha: ${sha}`,
                   `- check: ${r.name}`,

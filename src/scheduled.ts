@@ -2,7 +2,7 @@ import type { ScheduledJobGroup } from "./repos";
 
 const SAFE_CHARS = /[^a-z0-9-]/g;
 
-function safe(value: string): string {
+export function safe(value: string): string {
   return value.toLowerCase().replace(SAFE_CHARS, "-");
 }
 
