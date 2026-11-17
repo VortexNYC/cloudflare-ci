@@ -130,6 +130,10 @@ const repoConfigSchema = z.object({
   verifyEnv: z.record(z.string()).default({}),
   // Named worker secrets injected into the verify step env (authed probes).
   verifySecrets: z.array(z.string()).default([]),
+  // Non-gating smoke/probe step after verify. Failures are logged without
+  // rolling back a deployment that already passed the health gate.
+  postDeployCommand: z.string().optional(),
+  postDeploySecrets: z.array(z.string()).default([]),
   // Extra secrets injected into the build step alongside NPM_TOKEN
   // (e.g. PostHog sourcemap upload for Seal).
   buildSecrets: z.array(z.string()).default([]),
@@ -401,7 +405,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       "pnpm exec vp run -F ./apps/docs build && " +
       "pnpm exec vp run -F @vortex/hosted build",
     // Sandbox promotion is deploy-only for now. Database migrations stay on
-    // migrate.yml until Sandbox connectivity is proven.
+    // the production migration step until Sandbox connectivity is proven.
     preDeployCommand:
       "bash scripts/deploy-worker.sh sandbox && " +
       "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include OpsRelaySandbox) && " +
@@ -412,7 +416,11 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include ElementCdnSandbox)",
     preDeployVerifyCommand:
       "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.sandbox.vortex.nyc",
-    // Every worker in the monorepo ships on main after the sandbox gate.
+    migrateCommand:
+      'DATABASE_URL="$VORTEX_MIGRATE_URL" pnpm --filter @vortexnyc/money-kernel db:migrate',
+    migrateSecrets: ["VORTEX_MIGRATE_URL"],
+    // Every worker in the monorepo ships on main after the sandbox gate and
+    // production migration.
     deployCommand:
       "SKIP_MIGRATE=1 bash scripts/deploy-worker.sh && " +
       "(cd packages/global && pnpm exec vp exec wrangler deploy) && " +
@@ -430,19 +438,18 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       '(cd apps/docs && pnpm exec vp exec wrangler versions upload --config dist/server/wrangler.json --preview-alias "$CI_PREVIEW_ALIAS")',
     // api.vortex.nyc serves /health even during maintenance windows — a 200
     // right after deploy proves the upload serves, not just uploads.
-    verifyCommand:
+    verifyCommand: "curl -fsS --max-time 15 https://api.vortex.nyc/health",
+    postDeployCommand:
       "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.vortex.nyc",
     releaseRecordCommand:
       "pnpm exec vp exec tsx scripts/release-record.ts record " +
       "--out /tmp/release-record.json " +
       "--evidence \"cloudflare-ci deploy\" " +
       "--ci-run-url \"${CI_RUN_URL:-cloudflare-ci}\"" +
-      " && curl -fsS -X PUT " +
-      "\"${CI_PUBLIC_URL}/admin/release-record/${CI_REPO}/${CI_SHA}\" " +
-      "-H \"Authorization: Bearer ${ADMIN_TOKEN}\" " +
-      "-H \"Content-Type: application/json\" " +
-      "--data-binary @/tmp/release-record.json",
-    releaseRecordSecrets: ["ADMIN_TOKEN"],
+      " && printf '%s\\n' 'CLOUDFLARE_CI_RELEASE_RECORD_BEGIN' " +
+      " && cat /tmp/release-record.json " +
+      " && printf '%s\\n' 'CLOUDFLARE_CI_RELEASE_RECORD_END'",
+    releaseRecordSecrets: [],
     publishCommands: [
       {
         name: "publish-typescript-sdk",
