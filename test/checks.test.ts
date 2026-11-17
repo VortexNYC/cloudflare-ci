@@ -10,6 +10,7 @@ import {
   buildCheckoutScript,
   buildRunScript,
 } from "../src/checks-workflow.ts";
+import { getRepoConfig } from "../src/repos.ts";
 
 async function sign(secret: string, body: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -255,6 +256,24 @@ test("buildRunScript emits install timing when install is configured", () => {
     [{ name: "ci", command: "true" }]
   );
   assert.match(script, /install_started=\$\(date \+%s%3N\)/);
+});
+
+test("vortex money-path check resolves vp through pnpm after isolated install", () => {
+  const config = getRepoConfig("vortex");
+  const check = config?.checks?.find(
+    (entry) => entry.name === "worker-money-paths-regression"
+  );
+  assert.ok(config?.checksInstallCommand);
+  assert.ok(check?.isolated);
+  assert.ok(check?.command);
+  assert.doesNotMatch(check.command, /(?:^|[\n;&(|]\s*)vp exec/);
+  assert.match(check.command, /pnpm exec vp exec alchemy/);
+  assert.match(check.command, /pnpm exec vp exec wrangler/);
+  assert.match(check.command, /pnpm exec vp exec tsx/);
+
+  const script = buildRunScript(config!, [check]);
+  assert.match(script, /\{ .*pnpm install --frozen-lockfile.*; \}/);
+  assert.match(script, /pnpm exec vp exec alchemy/);
 });
 
 test("buildRunScript passes per-check env through the timeout wrapper", () => {
