@@ -58,7 +58,13 @@ export interface ChecksRunResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  checkoutMs: number;
+  restoreMs: number;
+  installMs: number;
+  checkMs: Record<string, number>;
 }
+
+type ScriptResult = Pick<ChecksRunResult, "exitCode" | "stdout" | "stderr">;
 
 export class ChecksSandbox extends DurableObject<Bindings> {
   private readonly container: Container;
@@ -126,7 +132,7 @@ export class ChecksSandbox extends DurableObject<Bindings> {
     script: string,
     timeoutSec: number,
     env: Record<string, string>
-  ): Promise<ChecksRunResult> {
+  ): Promise<ScriptResult> {
     await this.files.writeFile(path, script);
     // GNU timeout kills the process group — an AbortSignal would orphan the
     // script's children. Exit code 124 means the bound was hit.
@@ -211,12 +217,14 @@ export class ChecksSandbox extends DurableObject<Bindings> {
 
   async runCheck(opts: ChecksRunOptions): Promise<ChecksRunResult> {
     await this.ensureRunning();
+    const checkoutStarted = Date.now();
     const checkout = await this.execScript(
       CHECKOUT_SCRIPT_PATH,
       opts.checkoutScript,
       CHECKOUT_TIMEOUT_SEC,
       opts.checkoutEnv ?? opts.env
     );
+    const checkoutMs = Date.now() - checkoutStarted;
     // Seed the pnpm store from the previous run with the same lockfile, then
     // run install+check, then publish the fresh store when install succeeded
     // (the script touches the sentinel). Restores/backup are best-effort.
@@ -224,18 +232,25 @@ export class ChecksSandbox extends DurableObject<Bindings> {
       opts.cacheRepo && checkout.exitCode === 0
         ? await this.storeKey(opts.cacheRepo)
         : null;
+    const restoreStarted = Date.now();
     if (key) await this.restoreStore(key);
+    const restoreMs = Date.now() - restoreStarted;
     const run = await this.execScript(
       RUN_SCRIPT_PATH,
       opts.script,
       opts.timeoutSec,
       opts.env
     );
+    const phase = parseTimingMarkers(checkout.stdout + checkout.stderr + run.stdout + run.stderr);
     if (key) await this.saveStore(key);
     return {
       exitCode: run.exitCode,
       stdout: checkout.stdout + run.stdout,
       stderr: checkout.stderr + run.stderr,
+      checkoutMs,
+      restoreMs,
+      installMs: phase.installMs ?? 0,
+      checkMs: phase.checkMs,
     };
   }
 
@@ -244,4 +259,19 @@ export class ChecksSandbox extends DurableObject<Bindings> {
       await this.container.destroy();
     }
   }
+}
+
+function parseTimingMarkers(output: string): {
+  installMs?: number;
+  checkMs: Record<string, number>;
+} {
+  const install = output.match(/===CI:INSTALL:MS=(\d+)===$/m);
+  const checkMs: Record<string, number> = {};
+  for (const match of output.matchAll(/^===CHECK:([^:]+):MS=(\d+)===$/gm)) {
+    checkMs[match[1]!] = Number(match[2]);
+  }
+  return {
+    ...(install ? { installMs: Number(install[1]) } : {}),
+    checkMs,
+  };
 }
