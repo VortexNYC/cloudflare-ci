@@ -48,7 +48,7 @@ export interface ChecksRunOptions {
   env: Record<string, string>;
   /** GNU-timeout bound on the install+check script, in seconds. */
   timeoutSec: number;
-  /** Env for the install+check exec. Secrets belong here, not in checkoutEnv. */
+  /** Env for the checkout exec only. Secrets belong in env, not here. */
   checkoutEnv?: Record<string, string>;
   /** Repo short name for the store-cache key; absent disables caching. */
   cacheRepo?: string;

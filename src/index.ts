@@ -11,6 +11,11 @@ import {
   verifyGitHubSignature,
 } from "./checks";
 import { getRepoConfig, getScheduledJobsForCron } from "./repos";
+import {
+  isWorkflowAlreadyExists,
+  scheduledScopeFor,
+  scheduledWorkflowId,
+} from "./scheduled";
 import type { Bindings } from "./env";
 import type { CiScheduler } from "./scheduler";
 import { logCiEvent } from "./observability";
@@ -509,54 +514,71 @@ export default {
     validateEnv(env);
     ctx.waitUntil(
       (async () => {
-        const jobs = getScheduledJobsForCron(event.cron);
+        let jobs: ReturnType<typeof getScheduledJobsForCron> = [];
+        try {
+          jobs = getScheduledJobsForCron(event.cron);
+        } catch (err) {
+          await logCiEvent(env, "ci.scheduled.dispatch_failed", {
+            cron: event.cron,
+            error: String(err),
+          });
+        }
         for (const job of jobs) {
-          const token = await getChecksGitHubToken(env, job.repo);
-          if (!token) {
-            await logCiEvent(env, "ci.scheduled.no_github_token", {
+          try {
+            const token = await getChecksGitHubToken(env, job.repo);
+            if (!token) {
+              await logCiEvent(env, "ci.scheduled.no_github_token", {
+                repo: job.repo,
+                cron: event.cron,
+                checks: job.checkNames,
+              });
+              continue;
+            }
+            const sha = await getCommitSha(token, job.repo, "main");
+            const scheduledKey = scheduledScopeFor(job, event.scheduledTime);
+            const id = scheduledWorkflowId(scheduledKey);
+            await env.CHECKS_WORKFLOW.create({
+              id,
+              params: {
+                repo: job.repo,
+                sha,
+                scheduled: true,
+                scheduledKey,
+                checkNames: job.checkNames,
+              },
+            })
+              .then(() =>
+                logCiEvent(env, "ci.scheduled.dispatched", {
+                  repo: job.repo,
+                  sha,
+                  cron: event.cron,
+                  checks: job.checkNames,
+                  workflowId: id,
+                })
+              )
+              .catch(async (err: unknown) => {
+                if (isWorkflowAlreadyExists(err)) {
+                  await logCiEvent(env, "ci.scheduled.duplicate", {
+                    repo: job.repo,
+                    cron: event.cron,
+                    workflowId: id,
+                  });
+                  return;
+                }
+                await logCiEvent(env, "ci.scheduled.dispatch_failed", {
+                  repo: job.repo,
+                  cron: event.cron,
+                  error: String(err),
+                });
+              });
+          } catch (err) {
+            await logCiEvent(env, "ci.scheduled.dispatch_failed", {
               repo: job.repo,
               cron: event.cron,
               checks: job.checkNames,
+              error: String(err),
             });
-            continue;
           }
-          const sha = await getCommitSha(token, job.repo, "main");
-          const repoKey = job.repo.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-          const checkSlug = job.checkNames
-            .join("+")
-            .toLowerCase()
-            .replace(/[^a-z0-9-]/g, "-");
-          const scheduledKey = `scheduled-${repoKey}-${checkSlug}-${Date.now()}`;
-          const id = `${scheduledKey}-${sha.slice(0, 10)}`.replace(
-            /[^a-z0-9-]/g,
-            "-"
-          );
-          await env.CHECKS_WORKFLOW.create({
-            id,
-            params: {
-              repo: job.repo,
-              sha,
-              scheduled: true,
-              scheduledKey,
-              checkNames: job.checkNames,
-            },
-          })
-            .then(() =>
-              logCiEvent(env, "ci.scheduled.dispatched", {
-                repo: job.repo,
-                sha,
-                cron: event.cron,
-                checks: job.checkNames,
-                workflowId: id,
-              })
-            )
-            .catch((err: unknown) =>
-              logCiEvent(env, "ci.scheduled.dispatch_failed", {
-                repo: job.repo,
-                cron: event.cron,
-                error: String(err),
-              })
-            );
         }
         if (event.cron === "*/30 * * * *") {
           await env.CANARY_WORKFLOW.create({ id: `canary-${Date.now()}`, params: {} });

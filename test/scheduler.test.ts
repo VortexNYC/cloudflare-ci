@@ -385,3 +385,63 @@ test("completeAuxWorkflow stops refire after normal checks finish", async () => 
   const row = await storage.get<{ status: string }>(key);
   assert.equal(row?.status, "completed");
 });
+
+test("alertDue dedupes inside the window and reopens after it", async () => {
+  const { scheduler, storage } = makeScheduler();
+  assert.equal(await scheduler.alertDue("k", 60_000), true);
+  assert.equal(await scheduler.alertDue("k", 60_000), false);
+  assert.equal(await scheduler.alertDue("other", 60_000), true);
+  await storage.put("alert/dedupe/k", Date.now() - 61_000);
+  assert.equal(await scheduler.alertDue("k", 60_000), true);
+});
+
+test("alertDue treats an infinite window as once-ever", async () => {
+  const { scheduler } = makeScheduler();
+  assert.equal(await scheduler.alertDue("once", Number.MAX_SAFE_INTEGER), true);
+  assert.equal(await scheduler.alertDue("once", Number.MAX_SAFE_INTEGER), false);
+});
+
+test("scheduled aux workflows refire with the scheduledKey id and scoped storage key", async () => {
+  const { scheduler, storage } = makeScheduler();
+  const scheduledKey = "scheduled-1763335200000-vortexnyc-vortex-synthetic-monitor";
+  const createdIds: string[] = [];
+  (scheduler as never as { env: object }).env = {
+    ...((scheduler as never as { env: Record<string, unknown> }).env),
+    CHECKS_WORKFLOW: {
+      get: async (id: string) => ({
+        status: async () => (id === "dead-sched" ? "errored" : "running"),
+      }),
+      create: async (opts: { id: string }) => {
+        createdIds.push(opts.id);
+        return { id: opts.id };
+      },
+    },
+    MIRROR_WORKFLOW: {
+      get: async () => ({ status: async () => "running" }),
+      create: async () => ({ id: "unused" }),
+    },
+  };
+  await scheduler.trackAuxWorkflow({
+    kind: "checks",
+    repo: "VortexNYC/vortex",
+    sha: "abcdef1234567890",
+    scope: scheduledKey,
+    instanceId: "dead-sched",
+    params: {
+      repo: "VortexNYC/vortex",
+      sha: "abcdef1234567890",
+      scheduled: true,
+      scheduledKey,
+      checkNames: ["synthetic-monitor"],
+    },
+  });
+  const scopedKey = `wrefire/checks/vortexnyc-vortex/abcdef1234/${scheduledKey}`;
+  assert.ok(storage.map.has(scopedKey));
+  assert.equal(storage.map.has("wrefire/checks/vortexnyc-vortex/abcdef1234"), false);
+
+  await scheduler.sweep();
+  assert.deepEqual(createdIds, [`${scheduledKey}-refire-1`]);
+  const row = await storage.get<{ instanceId: string; refires?: number }>(scopedKey);
+  assert.equal(row?.instanceId, `${scheduledKey}-refire-1`);
+  assert.equal(row?.refires, 1);
+});

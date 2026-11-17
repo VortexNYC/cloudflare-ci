@@ -235,8 +235,8 @@ export class CiScheduler extends DurableObject<Bindings> {
   /** Atomic alert dedupe — one page per key per window, persisted in the DO. */
   async alertDue(key: string, windowMs: number): Promise<boolean> {
     const storageKey = `alert/dedupe/${key}`;
-    const last = (await this.ctx.storage.get<number>(storageKey)) ?? 0;
-    if (Date.now() - last < windowMs) return false;
+    const last = await this.ctx.storage.get<number>(storageKey);
+    if (last !== undefined && Date.now() - last < windowMs) return false;
     await this.ctx.storage.put(storageKey, Date.now());
     return true;
   }

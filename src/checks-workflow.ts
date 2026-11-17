@@ -13,6 +13,7 @@ import {
   type CheckTarget,
 } from "./checks";
 import { sendOpsAlert } from "./alerts";
+import { notConfiguredAlertKey } from "./scheduled";
 
 const MINUTE = 60 * 1000;
 
@@ -119,6 +120,37 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         () => fn(scheduler())
       );
 
+    if (event.payload.scheduled) {
+      const secretResolution = resolveCheckSecrets(this.env, checks);
+      if (secretResolution.missing.length > 0) {
+        const missing = secretResolution.missing;
+        const alerted = await withScheduler("not-configured-alert", (stub) =>
+          stub.alertDue(
+            notConfiguredAlertKey(repo, missing),
+            Number.MAX_SAFE_INTEGER
+          )
+        ).catch(() => false);
+        if (alerted) {
+          await logCiEvent(this.env, "ci.scheduled.not_configured", {
+            repo,
+            checks: checks.map((c) => c.name),
+            missing,
+          });
+          await sendOpsAlert(
+            this.env,
+            "Scheduled checks not configured",
+            [
+              "cloudflare-ci scheduled checks are not configured on this Worker.",
+              `- repo: ${repo}`,
+              `- checks: ${checks.map((c) => c.name).join(", ")}`,
+              `- missing secrets: ${missing.join(", ")}`,
+            ].join("\n")
+          ).catch(() => {});
+        }
+        return;
+      }
+    }
+
     await withScheduler("track-aux-wf", (stub) =>
       stub.trackAuxWorkflow({
         kind: "checks",
@@ -130,11 +162,16 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       })
     );
 
-    const sandboxId = `checks-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${sha.slice(0, 10)}`;
+    const sandboxScope = scheduledScope
+      ? `-${scheduledScope.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`
+      : "";
+    const sandboxId = `checks-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${sha.slice(0, 10)}${sandboxScope}`;
     // Reuse existing runs on refire — a refired webhook must not mint a
     // duplicate context per check name.
     const runIds = await step.do("create-check-runs", async () => {
       const ids: Record<string, number> = {};
+      // Scheduled lanes are log+alert only — never mint check-runs on main.
+      if (event.payload.scheduled) return ids;
       for (const c of checks) {
         ids[c.name] = await getOrCreateCheckRun(token, repo, sha, c.name);
       }
@@ -276,10 +313,12 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           });
           for (const c of serialChecks) {
             await step.do(`queued-${c.name}`, () =>
-              updateCheckRunStatus(token, repo, runIds[c.name]!, "queued", {
-                title: `${c.name} queued`,
-                summary: `${first.reason} — waiting for a checks slot.`,
-              }).catch(() => {})
+              event.payload.scheduled
+                ? Promise.resolve()
+                : updateCheckRunStatus(token, repo, runIds[c.name]!, "queued", {
+                    title: `${c.name} queued`,
+                    summary: `${first.reason} — waiting for a checks slot.`,
+                  }).catch(() => {})
             );
           }
           const waited = await step
@@ -332,26 +371,27 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 timeout: 90 * MINUTE,
               },
               async (): Promise<CheckResult[]> => {
-                const secretResolution = resolveCheckSecrets(this.env, serialChecks);
-                if (secretResolution.missing.length > 0) {
-                  const err = `Missing Worker secret(s): ${secretResolution.missing.join(", ")}`;
-                  return serialChecks.map((c) => ({ name: c.name, error: err }));
-                }
-                for (const c of serialChecks) {
-                  await updateCheckRunStatus(
-                    token,
-                    repo,
-                    runIds[c.name]!,
-                    "in_progress"
-                  ).catch(() => {});
+                if (!event.payload.scheduled) {
+                  for (const c of serialChecks) {
+                    await updateCheckRunStatus(
+                      token,
+                      repo,
+                      runIds[c.name]!,
+                      "in_progress"
+                    ).catch(() => {});
+                  }
                 }
                 const sandbox = this.env.CHECKS_SANDBOX.getByName(slotName);
                 try {
                   const run = await sandbox.runCheck({
                     checkoutScript: buildCheckoutScript(event.payload),
                     script: buildRunScript(config, serialChecks),
-                    env: { ...checkoutEnv, ...secretResolution.values },
-                    checkoutEnv,
+                    env: {
+                      GITHUB_TOKEN: token,
+                      NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+                      PR_BODY: prBody,
+                      CI: "true",
+                    },
                     timeoutSec: 85 * 60,
                     cacheRepo: config.checksInstallCommand
                       ? repo.split("/")[1]
@@ -385,12 +425,14 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         } else {
           for (const c of serialChecks) {
             await step.do(`start-${c.name}`, () =>
-              updateCheckRunStatus(
-                token,
-                repo,
-                runIds[c.name]!,
-                "in_progress"
-              ).catch(() => {})
+              event.payload.scheduled
+                ? Promise.resolve()
+                : updateCheckRunStatus(
+                    token,
+                    repo,
+                    runIds[c.name]!,
+                    "in_progress"
+                  ).catch(() => {})
             );
           }
           results = await step.do(
@@ -400,18 +442,17 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               timeout: 90 * MINUTE,
             },
             async (): Promise<CheckResult[]> => {
-              const secretResolution = resolveCheckSecrets(this.env, serialChecks);
-              if (secretResolution.missing.length > 0) {
-                const err = `Missing Worker secret(s): ${secretResolution.missing.join(", ")}`;
-                return serialChecks.map((c) => ({ name: c.name, error: err }));
-              }
               const sandbox = this.env.CHECKS_SANDBOX.getByName(slotName);
               try {
                 const run = await sandbox.runCheck({
                   checkoutScript: buildCheckoutScript(event.payload),
                   script: buildRunScript(config, serialChecks),
-                  env: { ...checkoutEnv, ...secretResolution.values },
-                  checkoutEnv,
+                  env: {
+                    GITHUB_TOKEN: token,
+                    NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+                    PR_BODY: prBody,
+                    CI: "true",
+                  },
                   timeoutSec: 85 * 60,
                   cacheRepo: config.checksInstallCommand
                     ? repo.split("/")[1]
@@ -494,10 +535,12 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
           // for a slot inside the workflow instead of failing the check
           // (an author used to have to push an empty commit to retrigger).
           await step.do(`queued-${check.name}`, () =>
-            updateCheckRunStatus(token, repo, runIds[check.name]!, "queued", {
-              title: `${check.name} queued`,
-              summary: `${first.reason} — waiting for a checks slot to free up.`,
-            }).catch(() => {})
+            event.payload.scheduled
+              ? Promise.resolve()
+              : updateCheckRunStatus(token, repo, runIds[check.name]!, "queued", {
+                  title: `${check.name} queued`,
+                  summary: `${first.reason} — waiting for a checks slot to free up.`,
+                }).catch(() => {})
           );
           const waited = await step
             .do(
@@ -546,12 +589,14 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             check: check.name,
           });
           await step.do(`start-${check.name}`, () =>
-            updateCheckRunStatus(
-              token,
-              repo,
-              runIds[check.name]!,
-              "in_progress"
-            ).catch(() => {})
+            event.payload.scheduled
+              ? Promise.resolve()
+              : updateCheckRunStatus(
+                  token,
+                  repo,
+                  runIds[check.name]!,
+                  "in_progress"
+                ).catch(() => {})
           );
         }
 
@@ -571,13 +616,6 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             timeout: 80 * MINUTE,
           },
           async (): Promise<CheckResult> => {
-            const secretResolution = resolveCheckSecrets(this.env, [check]);
-            if (secretResolution.missing.length > 0) {
-              return {
-                name: check.name,
-                error: `Missing Worker secret(s): ${secretResolution.missing.join(", ")}`,
-              };
-            }
             const sandbox = this.env.CHECKS_SANDBOX.getByName(checkSandboxId);
             try {
               // Flat 75min bound on install+check; check.timeoutMs bounds
@@ -588,13 +626,23 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               const run = await sandbox.runCheck({
                 checkoutScript: buildCheckoutScript(event.payload),
                 script: buildRunScript(config, [check]),
-                env: {
-                  ...checkoutEnv,
-                  PR_NUMBER: String(prNumber ?? ""),
-                  REPO: repo,
-                  ...secretResolution.values,
-                },
-                checkoutEnv,
+                env: event.payload.scheduled
+                  ? {
+                      ...checkoutEnv,
+                      PR_NUMBER: String(prNumber ?? ""),
+                      REPO: repo,
+                      ...checkSecrets,
+                    }
+                  : {
+                      GITHUB_TOKEN: token,
+                      NPM_TOKEN: this.env.NPM_TOKEN ?? "",
+                      PR_BODY: prBody,
+                      PR_NUMBER: String(prNumber ?? ""),
+                      REPO: repo,
+                      CI: "true",
+                      ...checkSecrets,
+                    },
+                checkoutEnv: event.payload.scheduled ? checkoutEnv : undefined,
                 timeoutSec: 75 * 60,
                 cacheRepo:
                   config.checksInstallCommand && check.needsInstall !== false
@@ -645,6 +693,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
       results = [...(results ?? []), ...parallelResults];
 
       for (const r of results) {
+        if (event.payload.scheduled) continue;
         await step.do(`report-${r.name}`, () => {
           if (r.superseded) {
             return completeCheckRun(token, repo, runIds[r.name]!, {
@@ -740,6 +789,7 @@ interface CheckShape {
   timeoutMs?: number;
   needsInstall?: boolean;
   secrets?: string[];
+  optionalSecrets?: string[];
   isolated?: boolean;
   sameRepoOnly?: boolean;
 }
@@ -749,6 +799,10 @@ function checkSecretsOf(env: Bindings, check: CheckShape): Record<string, string
   for (const name of check.secrets ?? []) {
     const value = (env as Record<string, unknown>)[name];
     out[name] = typeof value === "string" ? value : "";
+  }
+  for (const name of check.optionalSecrets ?? []) {
+    const value = (env as Record<string, unknown>)[name];
+    if (typeof value === "string" && value.length > 0) out[name] = value;
   }
   return out;
 }
