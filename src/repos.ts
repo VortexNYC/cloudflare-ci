@@ -50,6 +50,13 @@ const repoConfigSchema = z.object({
   // Optional for checks-only repos (veil flips before its deploy path).
   buildCommand: z.string().optional(),
   deployCommand: z.string().optional(),
+  // Main-only promotion gate. This is deliberately separate from
+  // previewCommand: a PR may preview, but it must never run a sandbox or
+  // production deploy.
+  preDeployCommand: z.string().optional(),
+  preDeploySecrets: z.array(z.string()).default([]),
+  preDeployVerifyCommand: z.string().optional(),
+  preDeployVerifySecrets: z.array(z.string()).default([]),
   // Automated migrations for non-D1 databases (e.g. vortex PlanetScale) —
   // runs on the build snapshot so drizzle-kit resolves from node_modules.
   // Secrets arrive via migrateSecrets; interpolate them into env, not argv.
@@ -126,6 +133,19 @@ const repoConfigSchema = z.object({
   // Extra secrets injected into the build step alongside NPM_TOKEN
   // (e.g. PostHog sourcemap upload for Seal).
   buildSecrets: z.array(z.string()).default([]),
+  // Main-only release bookkeeping and publication. These run after deploy
+  // verification, never on PR/preview runs.
+  releaseRecordCommand: z.string().optional(),
+  releaseRecordSecrets: z.array(z.string()).default([]),
+  publishCommands: z
+    .array(
+      z.object({
+        name: z.string(),
+        command: z.string(),
+        secrets: z.array(z.string()).default([]),
+      })
+    )
+    .default([]),
   d1Database: z.string().optional(),
   d1MigrationsCwd: z.string().default("."),
 });
@@ -380,15 +400,19 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       "pnpm exec vp run -F ./apps/landing build && " +
       "pnpm exec vp run -F ./apps/docs build && " +
       "pnpm exec vp run -F @vortex/hosted build",
-    // Automated PlanetScale migrations (replaces the manual `pscale role
-    // reset` + `db:migrate` runbook): the migrate step runs off the deps
-    // snapshot — the deploy below then skips re-migrating (SKIP_MIGRATE=1).
-    migrateCommand:
-      'DATABASE_URL="$VORTEX_MIGRATE_URL" pnpm --filter @vortexnyc/money-kernel db:migrate',
-    migrateSecrets: ["VORTEX_MIGRATE_URL"],
-    // Every worker in the monorepo ships on main — same all-apps model as
-    // seal. deploy-worker.sh gates on migrations; the pipeline's migrate
-    // step already ran them, so SKIP_MIGRATE=1 keeps ordering in CI.
+    // Sandbox promotion is deploy-only for now. Database migrations stay on
+    // migrate.yml until Sandbox connectivity is proven.
+    preDeployCommand:
+      "bash scripts/deploy-worker.sh sandbox && " +
+      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include OpsRelaySandbox) && " +
+      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include AuthSandbox --include EdgeRateLimit) && " +
+      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include CdeSandbox) && " +
+      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include DashboardSandbox) && " +
+      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include LandingSandbox) && " +
+      "(vp exec alchemy deploy scripts/alchemy/run.ts --stage sandbox --no-input --yes --include ElementCdnSandbox)",
+    preDeployVerifyCommand:
+      "pnpm exec vp exec tsx scripts/gate-post-deploy-smoke.cli.ts --base https://api.sandbox.vortex.nyc",
+    // Every worker in the monorepo ships on main after the sandbox gate.
     deployCommand:
       "SKIP_MIGRATE=1 bash scripts/deploy-worker.sh && " +
       "(cd packages/global && pnpm exec vp exec wrangler deploy) && " +
@@ -407,6 +431,34 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     // api.vortex.nyc serves /health even during maintenance windows — a 200
     // right after deploy proves the upload serves, not just uploads.
     verifyCommand: "curl -fsS --max-time 15 https://api.vortex.nyc/health",
+    releaseRecordCommand:
+      "pnpm exec vp exec tsx scripts/release-record.ts record " +
+      "--out /tmp/release-record.json " +
+      "--evidence \"cloudflare-ci deploy\" " +
+      "--ci-run-url \"${CI_RUN_URL:-cloudflare-ci}\"" +
+      " && curl -fsS -X PUT " +
+      "\"${CI_PUBLIC_URL}/admin/release-record/${CI_REPO}/${CI_SHA}\" " +
+      "-H \"Authorization: Bearer ${ADMIN_TOKEN}\" " +
+      "-H \"Content-Type: application/json\" " +
+      "--data-binary @/tmp/release-record.json",
+    releaseRecordSecrets: ["ADMIN_TOKEN"],
+    publishCommands: [
+      {
+        name: "publish-typescript-sdk",
+        command: "pnpm run ci:publish-sdk",
+        secrets: ["NPM_TOKEN"],
+      },
+      {
+        name: "publish-python-sdk",
+        command: "pnpm run ci:publish-python-sdk",
+        secrets: ["PYPI_TOKEN"],
+      },
+      {
+        name: "publish-go-sdk",
+        command: "pnpm run ci:publish-go-sdk",
+        secrets: ["GO_SDK_PUSH_TOKEN"],
+      },
+    ],
     checksInstallCommand:
       '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
       'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +

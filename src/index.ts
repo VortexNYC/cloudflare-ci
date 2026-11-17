@@ -211,6 +211,29 @@ async function handleReleaseAssetPut(
   return new Response("OK", { status: 200 });
 }
 
+async function handleReleaseRecordPut(
+  request: Request,
+  env: Bindings,
+  repo: string,
+  sha: string
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  const provided = request.headers
+    .get("authorization")
+    ?.replace(/^Bearer /i, "");
+  if (!expected || !provided || !(await timingSafeEqual(provided, expected))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(repo) || !/^[0-9a-f]{40}$/.test(sha)) {
+    return Response.json({ error: "invalid release record key" }, { status: 400 });
+  }
+  if (!request.body) return new Response("Bad Request", { status: 400 });
+  await env.BACKUP_BUCKET.put(`release-records/${repo}/${sha}.json`, request.body, {
+    httpMetadata: { contentType: "application/json" },
+  });
+  return new Response("OK", { status: 200 });
+}
+
 // Escape hatch for sandboxes whose step wedged before destroy() ran — a dead
 // exec stream or abandoned log stream leaves the container billing forever.
 async function handleSandboxKill(
@@ -479,6 +502,17 @@ export default {
         env,
         releaseAssetMatch[1]!,
         releaseAssetMatch[2]!
+      );
+    }
+    const releaseRecordMatch = pathname.match(
+      /^\/admin\/release-record\/([a-z0-9-]+)\/([0-9a-f]{40})$/i
+    );
+    if (releaseRecordMatch && request.method === "PUT") {
+      return handleReleaseRecordPut(
+        request,
+        env,
+        releaseRecordMatch[1]!,
+        releaseRecordMatch[2]!
       );
     }
     if (pathname === "/admin/sandbox/kill" && request.method === "POST") {

@@ -76,4 +76,5 @@ export type Bindings = CiBindings & {
   EMAIL?: { send(msg: unknown): Promise<void> };
   ALERT_EMAIL_FROM?: string;
   ALERT_EMAIL_TO?: string;
+  CI_PUBLIC_URL?: string;
 };

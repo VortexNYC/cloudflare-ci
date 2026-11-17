@@ -291,6 +291,54 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       return;
     }
 
+    // Main-only promotion gate. The branch return above makes it impossible
+    // for a PR/preview event to deploy sandbox or production.
+    if (config.preDeployCommand) {
+      await buildResult.runner({
+        name: "sandbox-deploy",
+        command: bound(
+          `${npmrcCommand} && ${relinkCommand} && ${config.preDeployCommand}`,
+          DEPLOY_COMMAND_TIMEOUT_MS
+        ),
+        secrets: ["NPM_TOKEN", ...config.preDeploySecrets],
+        persist: false,
+        cloudflareCredentials: {
+          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+        },
+        env: {
+          ...baseEnv,
+          CI_PUBLIC_URL: this.env.CI_PUBLIC_URL ?? "",
+          CI_RUN_URL: this.env.CI_PUBLIC_URL ?? "",
+          CI_REPO: String(repo),
+          CI_SHA: String(_event.payload.sha),
+        },
+        config: {
+          timeout: DEPLOY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+        },
+      });
+    }
+    if (config.preDeployVerifyCommand) {
+      await ci.runner({
+        name: "sandbox-verify",
+        sandbox: "SANDBOX_LITE",
+        persist: false,
+        command: bound(
+          config.preDeployVerifyCommand,
+          VERIFY_COMMAND_TIMEOUT_MS
+        ),
+        secrets: config.preDeployVerifySecrets,
+        cloudflareCredentials: {
+          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+        },
+        env: baseEnv,
+        config: {
+          timeout: VERIFY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: VERIFY_COMMAND_TIMEOUT_MS,
+        },
+      });
+    }
+
     if (config.migrateCommand) {
       // Non-D1 migrations (PlanetScale etc.) run on the build snapshot —
       // the migrate tool resolves from node_modules. Migrate-only repos
@@ -622,6 +670,51 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         throw watchError;
       }
     }
+
+    if (config.releaseRecordCommand) {
+      await buildResult.runner({
+        name: "release-record",
+        command: bound(
+          `${npmrcCommand} && ${relinkCommand} && ${config.releaseRecordCommand}`,
+          DEPLOY_COMMAND_TIMEOUT_MS
+        ),
+        secrets: ["NPM_TOKEN", ...config.releaseRecordSecrets],
+        persist: false,
+        env: {
+          ...baseEnv,
+          CI_PUBLIC_URL: this.env.CI_PUBLIC_URL ?? "",
+          CI_RUN_URL: this.env.CI_PUBLIC_URL ?? "",
+          CI_REPO: String(repo),
+          CI_SHA: String(_event.payload.sha),
+        },
+        config: {
+          timeout: DEPLOY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+        },
+      });
+    }
+
+    for (const publication of config.publishCommands) {
+      await buildResult.runner({
+        name: publication.name,
+        command: bound(
+          `${npmrcCommand} && ${relinkCommand} && ${publication.command}`,
+          DEPLOY_COMMAND_TIMEOUT_MS
+        ),
+        secrets: ["NPM_TOKEN", ...publication.secrets],
+        persist: false,
+        env: {
+          ...baseEnv,
+          CI_RUN_URL: this.env.CI_PUBLIC_URL ?? "",
+          GITHUB_REF: "refs/heads/main",
+        },
+        config: {
+          timeout: DEPLOY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+        },
+      });
+    }
+
     await withScheduler("dedupe-complete", async (stub) => {
       await stub.completeClaim(String(repo), branchKey, _event.instanceId);
       return null;
