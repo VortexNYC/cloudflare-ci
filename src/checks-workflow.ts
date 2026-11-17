@@ -59,22 +59,25 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
 
     // Secret-bearing PR gates must never execute fork code in a sandbox —
     // the fork's install scripts would see the injected env. Verify the
-    // PR's head repo before any check-run or sandbox exists; a mismatch
-    // (or an unreadable head) drops the check, mirroring the old GHA
-    // `if:` same-repo guard.
+    // PR's head repo before any check-run or sandbox exists. The fetch is
+    // not caught: a transient GitHub error retries via step.do rather than
+    // silently looking like a fork.
     let sameRepoPr = true;
     if (prNumber !== undefined && checks.some((c) => c.sameRepoOnly)) {
-      sameRepoPr = await step.do("verify-pr-origin", async () => {
-        const headRepo = await fetchPrHeadRepoName(
-          token,
-          repo,
-          prNumber
-        ).catch(() => undefined);
-        return headRepo === repo;
-      });
+      sameRepoPr = await step.do(
+        "verify-pr-origin",
+        {
+          retries: { limit: 5, delay: 5_000, backoff: "linear" },
+          timeout: 60_000,
+        },
+        async () =>
+          (await fetchPrHeadRepoName(token, repo, prNumber)) === repo
+      );
     }
     const runnable = checks.filter((c) => !c.sameRepoOnly || sameRepoPr);
-    if (runnable.length === 0) return;
+    // Confirmed fork: these checks still need a check-run completed as
+    // neutral — a required context left unposted hangs the merge.
+    const forkSkipped = checks.filter((c) => c.sameRepoOnly && !sameRepoPr);
 
     const scheduler = () =>
       this.env.CI_SCHEDULER.get(this.env.CI_SCHEDULER.idFromName("global"));
@@ -103,11 +106,29 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
     // duplicate context per check name.
     const runIds = await step.do("create-check-runs", async () => {
       const ids: Record<string, number> = {};
-      for (const c of runnable) {
+      for (const c of checks) {
         ids[c.name] = await getOrCreateCheckRun(token, repo, sha, c.name);
       }
       return ids;
     });
+
+    for (const c of forkSkipped) {
+      await step.do(`skip-fork-${c.name}`, () =>
+        completeCheckRun(token, repo, runIds[c.name]!, {
+          conclusion: "neutral",
+          title: `${c.name} skipped`,
+          summary:
+            "Fork pull request — this check injects Worker secrets into " +
+            "its sandbox and only runs on same-repo branches.",
+        })
+      );
+    }
+    if (runnable.length === 0) {
+      await withScheduler("complete-aux-wf", (stub) =>
+        stub.completeAuxWorkflow("checks", repo, sha, event.instanceId)
+      );
+      return;
+    }
 
     // Merge-queue refs are per-group and immutable — superseding only
     // makes sense on real branch refs (pull_request / check_suite).
@@ -491,11 +512,11 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         // Check-declared secrets: names are looked up on this Worker's
         // env and injected into the sandbox — an unbound name lands as
         // "" so the check's own guard fails closed and reports the name.
-        const checkSecrets: Record<string, string> = {};
-        for (const name of check.secrets ?? []) {
-          const value = (this.env as Record<string, unknown>)[name];
-          checkSecrets[name] = typeof value === "string" ? value : "";
-        }
+        const checkSecrets = checkSecretsOf(this.env, check);
+        // GHA masked secret values; check output lands in GitHub
+        // check-run summaries and logs, so every non-empty injected value
+        // is scrubbed before it leaves.
+        const scrub = (text: string) => redactSecrets(text, checkSecrets);
 
         return step.do(
           `run-${check.name}`,
@@ -534,20 +555,20 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               if (parsed.checkoutRc !== 0) {
                 return {
                   name: check.name,
-                  error: `Checkout failed: ${parsed.output.slice(-2000)}`,
+                  error: `Checkout failed: ${scrub(parsed.output).slice(-2000)}`,
                 };
               }
               if (parsed.installRc !== 0) {
                 return {
                   name: check.name,
-                  error: `Install failed: ${parsed.output.slice(-2000)}`,
+                  error: `Install failed: ${scrub(parsed.output).slice(-2000)}`,
                 };
               }
               const out = parsed.checks[check.name];
               return {
                 name: check.name,
                 ok: out?.rc === 0,
-                output: (out?.output ?? "(no output)").slice(-4000),
+                output: scrub(out?.output ?? "(no output)").slice(-4000),
               };
             } finally {
               // Destroy while the reservation is still held — a wedged
@@ -566,7 +587,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
         parallelTargets.map((check): Promise<CheckResult> =>
           runOneCheck(check).catch((err: unknown) => ({
             name: check.name,
-            error: `Check run error: ${String(err)}`,
+            error: `Check run error: ${redactSecrets(String(err), checkSecretsOf(this.env, check))}`,
           }))
         )
       );
@@ -620,6 +641,41 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
 
 interface RepoConfigShape {
   checksInstallCommand?: string;
+}
+
+interface CheckShape {
+  name: string;
+  command: string;
+  env?: Record<string, string>;
+  timeoutMs?: number;
+  needsInstall?: boolean;
+  secrets?: string[];
+  isolated?: boolean;
+  sameRepoOnly?: boolean;
+}
+
+function checkSecretsOf(env: Bindings, check: CheckShape): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of check.secrets ?? []) {
+    const value = (env as Record<string, unknown>)[name];
+    out[name] = typeof value === "string" ? value : "";
+  }
+  return out;
+}
+
+/** Replace every non-empty secret value in `text` with `***` — check
+ *  output is posted to GitHub check-run summaries and logs, and GitHub
+ *  Actions masked these values before this check moved here. Longest
+ *  first so overlapping values can't leak a shorter secret's tail. */
+export function redactSecrets(text: string, secrets: Record<string, string>): string {
+  let out = text;
+  const values = Object.values(secrets)
+    .filter((v) => v.length > 0)
+    .sort((a, b) => b.length - a.length);
+  for (const value of values) {
+    out = out.split(value).join("***");
+  }
+  return out;
 }
 
 export function buildCheckoutScript(payload: {
