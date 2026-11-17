@@ -15,6 +15,7 @@ import type { Bindings } from "../src/env.ts";
 type RunOpts = {
   script: string;
   env: Record<string, string>;
+  cacheRepo?: string;
 };
 
 type GhPatch = { id: string; body: { conclusion?: string; output?: { title?: string; summary?: string } } };
@@ -34,7 +35,12 @@ type Harness = {
 function makeHarness(opts: { headRepo?: string; secretInOutput?: string } = {}): Harness {
   const headRepo = opts.headRepo ?? "VortexNYC/vortex";
   const sandboxNames: string[] = [];
-  const sandboxRuns: Array<{ name: string; env: Record<string, string> }> = [];
+  const sandboxRuns: Array<{
+    name: string;
+    env: Record<string, string>;
+    script: string;
+    cacheRepo?: string;
+  }> = [];
   const destroyed: string[] = [];
   const admits: string[] = [];
   const releases: string[] = [];
@@ -71,7 +77,12 @@ function makeHarness(opts: { headRepo?: string; secretInOutput?: string } = {}):
         sandboxNames.push(name);
         return {
           runCheck: async (o: RunOpts) => {
-            sandboxRuns.push({ name, env: o.env });
+            sandboxRuns.push({
+              name,
+              env: o.env,
+              script: o.script,
+              cacheRepo: o.cacheRepo,
+            });
             // Emit the same markers the real run script produces.
             const names = [...o.script.matchAll(/> \/tmp\/check-([A-Za-z0-9_-]+)\.out/g)].map(
               (m) => m[1]!
@@ -184,6 +195,9 @@ test("serial repo: an isolated check runs in its own sandbox + claim, secrets on
   const serialRun = h.sandboxRuns.find((r) => r.name === `${base}-all`)!;
   const isoRun = h.sandboxRuns.find((r) => r.name === `${base}-${ISOLATED}`)!;
   assert.ok(serialRun && isoRun);
+  assert.equal(isoRun.cacheRepo, "vortex");
+  assert.match(isoRun.script, /pnpm install --frozen-lockfile/);
+  assert.match(isoRun.script, /touch \/tmp\/\.install-ok/);
   // Secrets reach only the check that declares them by name.
   assert.equal(isoRun.env.FINIX_SANDBOX_USERNAME, "finix-user");
   assert.equal(isoRun.env.FINIX_SANDBOX_PASSWORD, "finix-pass");

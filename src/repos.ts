@@ -585,13 +585,13 @@ done
 # alchemy + wrangler authenticate via CLOUDFLARE_API_TOKEN.
 export CLOUDFLARE_API_TOKEN="\$CF_TOKEN"
 # PaymentsCi only — production and sandbox stay on deploy-worker.sh.
-vp exec alchemy deploy scripts/alchemy/run.ts --stage ci --no-input --yes --include PaymentsCi
+pnpm exec vp exec alchemy deploy scripts/alchemy/run.ts --stage ci --no-input --yes --include PaymentsCi
 # Per-PR origin: a preview-alias version serves THIS checkout at
 # <alias>-vortex-payments-ci.<subdomain>.workers.dev while the live
 # deployment is left alone.
 ALIAS="ci-pr-\${PR_NUMBER:-manual}-\$(git rev-parse --short HEAD 2>/dev/null || echo x)"
 ALIAS=\$(echo "\$ALIAS" | tr -cd 'a-z0-9-' | cut -c1-40)
-(cd packages/worker && vp exec wrangler versions upload -e ci --preview-alias "\$ALIAS")
+(cd packages/worker && pnpm exec vp exec wrangler versions upload -e ci --preview-alias "\$ALIAS")
 CI_ORIGIN="\${CLOUDFLARE_CI_BASE_URL/vortex-payments-ci/\${ALIAS}-vortex-payments-ci}"
 echo "isolated origin: \$CI_ORIGIN"
 code=000
@@ -604,7 +604,7 @@ done
 # Self-healing smoke fixtures — emits KEY=value on stdout (logs on
 # stderr): static seeds pass through when healthy, a disposable org +
 # merchant gets provisioned when rotted or absent.
-VORTEX_WORKER_ORIGIN="\$CI_ORIGIN" vp exec tsx scripts/ops-provision-smoke-org.ts > /tmp/money-env.out
+VORTEX_WORKER_ORIGIN="\$CI_ORIGIN" pnpm exec vp exec tsx scripts/ops-provision-smoke-org.ts > /tmp/money-env.out
 grep -E '^[A-Z0-9_]+=' /tmp/money-env.out > /tmp/money.env
 set -a; . /tmp/money.env; set +a
 # All four paths run even when an early one fails — one run surfaces
@@ -617,7 +617,7 @@ for proof in \\
   scripts/smoke-finix-payment-request-loop.ts \\
   packages/payments-provider/scripts/finix-certification-proof-suite.ts \\
   packages/payments-provider/scripts/finix-smoke-settlement-reconcile.ts; do
-  vp exec tsx "\$proof" || fail=1
+  pnpm exec vp exec tsx "\$proof" || fail=1
 done
 [ "\$fail" = 0 ] || { echo "::error::One or more money paths failed on the PR Worker"; exit 1; }`,
       },
