@@ -84,6 +84,19 @@ const repoConfigSchema = z.object({
         // prc) — skips checksInstallCommand so the sandbox goes straight to
         // the check instead of a full monorepo install (VTX-809).
         needsInstall: z.boolean().default(true),
+        // Named Worker secrets/vars injected into the check sandbox env —
+        // names only; values never appear in config or output. A check's
+        // own guard fails closed on a name that isn't bound.
+        secrets: z.array(z.string()).default([]),
+        // True runs the check in its own ChecksSandbox even when the repo
+        // is `serial` — a long live gate must not serialize behind (or
+        // block) the fast suite.
+        isolated: z.boolean().default(false),
+        // PR gates carrying secrets must never execute fork code: the
+        // workflow verifies the PR's head repo before any sandbox spawns
+        // and skips the check entirely on a mismatch (same contract as
+        // the old GHA `if:` guard — no context posted on forks).
+        sameRepoOnly: z.boolean().default(false),
       })
     )
     .default([]),
@@ -423,6 +436,89 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
         name: "prc",
         command: "bash production-readiness/prc.sh",
         timeoutMs: 15 * 60 * 1000,
+      },
+      {
+        // VOR-275 — the Blacksmith worker-money-paths-regression job moved
+        // here under the same check name so it can take over the required
+        // context. Deploys the PR's payments Worker with the same alchemy
+        // apply (`--stage ci --include PaymentsCi`), then uploads a
+        // non-promoted version under a per-PR --preview-alias: the health
+        // poll and the four billing proofs run against that isolated
+        // origin, so a concurrent PR's apply can never rewrite the code
+        // under test. The shared `vortex-payments-ci` script keeps its
+        // secret bindings — a fresh-name deploy would lose every one.
+        // Own ChecksSandbox: a ~40min live gate must not serialize into
+        // ci/trufflehog/prc. Secrets arrive by name; same-repo PRs only.
+        name: "worker-money-paths-regression",
+        isolated: true,
+        sameRepoOnly: true,
+        timeoutMs: 40 * 60 * 1000,
+        env: { FINIX_SMOKE_ENV: "sandbox" },
+        secrets: [
+          // CF_TOKEN is the Worker's deploy token — the command exports
+          // it as CLOUDFLARE_API_TOKEN for alchemy/wrangler, same as
+          // ci.ts does for its own deploy calls.
+          "CF_TOKEN",
+          "CLOUDFLARE_ACCOUNT_ID",
+          "CLOUDFLARE_CI_BASE_URL",
+          "FINIX_SANDBOX_USERNAME",
+          "FINIX_SANDBOX_PASSWORD",
+          // Optional smoke seeds — the provisioner self-heals when absent.
+          "VORTEX_SMOKE_API_KEY",
+          "VORTEX_SMOKE_CUSTOMER_ID",
+          "VORTEX_SMOKE_PAYMENT_METHOD_ID",
+          "FINIX_SMOKE_MERCHANT_ID",
+          "FINIX_SMOKE_PAYMENT_INSTRUMENT_ID",
+        ],
+        command: `set -euo pipefail
+# Sandbox image can still be Node 22 — same 24.22.2 shim as buildCommand.
+node -e 'const [M,m,p]=process.versions.node.split(".").map(Number); process.exit(M>22||(M===22&&(m>23||(m===23&&p>=4)))?0:1)' || \\
+  { mkdir -p "\$HOME/.local" && curl -fsSL "https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-\$(uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/').tar.gz" | tar -xz -C "\$HOME/.local" --strip-components=1; }
+export PATH="\$HOME/.local/bin:\$PATH"
+# Guard — fail closed when a required name is unbound on the Worker.
+missing=0
+for name in CF_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_CI_BASE_URL FINIX_SANDBOX_USERNAME FINIX_SANDBOX_PASSWORD; do
+  [ -z "\${!name:-}" ] && { echo "::error::\$name missing on the cloudflare-ci Worker"; missing=1; }
+done
+[ "\$missing" = 0 ] || exit 1
+# alchemy + wrangler authenticate via CLOUDFLARE_API_TOKEN.
+export CLOUDFLARE_API_TOKEN="\$CF_TOKEN"
+# PaymentsCi only — production and sandbox stay on deploy-worker.sh.
+vp exec alchemy deploy scripts/alchemy/run.ts --stage ci --no-input --yes --include PaymentsCi
+# Per-PR origin: a preview-alias version serves THIS checkout at
+# <alias>-vortex-payments-ci.<subdomain>.workers.dev while the live
+# deployment is left alone.
+ALIAS="ci-pr-\${PR_NUMBER:-manual}-\$(git rev-parse --short HEAD 2>/dev/null || echo x)"
+ALIAS=\$(echo "\$ALIAS" | tr -cd 'a-z0-9-' | cut -c1-40)
+(cd packages/worker && vp exec wrangler versions upload -e ci --preview-alias "\$ALIAS")
+CI_ORIGIN="\${CLOUDFLARE_CI_BASE_URL/vortex-payments-ci/\${ALIAS}-vortex-payments-ci}"
+echo "isolated origin: \$CI_ORIGIN"
+code=000
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  code=\$(curl -sf -o /dev/null -w '%{http_code}' "\$CI_ORIGIN/health" || echo 000)
+  [ "\$code" = 200 ] && break
+  sleep 10
+done
+[ "\$code" = 200 ] || { echo "::error::CI Worker preview did not become healthy"; exit 1; }
+# Self-healing smoke fixtures — emits KEY=value on stdout (logs on
+# stderr): static seeds pass through when healthy, a disposable org +
+# merchant gets provisioned when rotted or absent.
+VORTEX_WORKER_ORIGIN="\$CI_ORIGIN" vp exec tsx scripts/ops-provision-smoke-org.ts > /tmp/money-env.out
+grep -E '^[A-Z0-9_]+=' /tmp/money-env.out > /tmp/money.env
+set -a; . /tmp/money.env; set +a
+# All four paths run even when an early one fails — one run surfaces
+# every broken leg (PAY-53 rail contract).
+set +e
+fail=0
+export VORTEX_API_BASE_URL="\$CI_ORIGIN"
+for proof in \\
+  scripts/smoke-taxable-document-payment-worker.ts \\
+  scripts/smoke-finix-payment-request-loop.ts \\
+  packages/payments-provider/scripts/finix-certification-proof-suite.ts \\
+  packages/payments-provider/scripts/finix-smoke-settlement-reconcile.ts; do
+  vp exec tsx "\$proof" || fail=1
+done
+[ "\$fail" = 0 ] || { echo "::error::One or more money paths failed on the PR Worker"; exit 1; }`,
       },
     ],
   },

@@ -303,6 +303,23 @@ export async function completeCheckRun(
   });
 }
 
+/** The PR's head repo full_name — fork detection for checks that inject
+ *  secrets into a sandbox. Missing/deleted heads return undefined. */
+export async function fetchPrHeadRepoName(
+  token: string,
+  repo: string,
+  prNumber: number
+): Promise<string | undefined> {
+  const res = (await githubApi(
+    token,
+    "GET",
+    `/repos/${repo}/pulls/${prNumber}`
+  )) as Json;
+  const head = isObj(res.head) ? res.head : undefined;
+  const headRepo = head && isObj(head.repo) ? head.repo : undefined;
+  return headRepo ? str(headRepo.full_name) : undefined;
+}
+
 /** Fetch a PR's body — the diff-coverage "No tests:" escape hatch needs it. */
 export async function fetchPrBody(
   token: string,
