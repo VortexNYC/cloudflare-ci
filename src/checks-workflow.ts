@@ -354,7 +354,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
                 ? Promise.resolve()
                 : updateCheckRunStatus(token, repo, runIds[c.name]!, "queued", {
                     title: `${c.name} queued`,
-                    summary: `${first.outcome.reason} — waiting for a checks slot.`,
+                    summary: `${queueReason} — waiting for a checks slot.`,
                   }).catch(() => {})
 
 
@@ -620,7 +620,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
               ? Promise.resolve()
               : updateCheckRunStatus(token, repo, runIds[check.name]!, "queued", {
                   title: `${check.name} queued`,
-                  summary: `${first.outcome.reason} — waiting for a checks slot to free up.`,
+                  summary: `${queueReason} — waiting for a checks slot to free up.`,
                 }).catch(() => {})
 
 
