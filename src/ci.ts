@@ -8,6 +8,7 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { Bindings } from "./env";
 import { getRepoConfig } from "./repos";
 import { capturePostHog } from "./posthog";
+import { getInstallationToken } from "./checks";
 
 const MINUTE = 60 * 1000;
 
@@ -77,6 +78,43 @@ const cleanupCommand =
 const buildCleanupCommand =
   'find . -type d \\( -name node_modules -o -name .cache \\) -prune -exec rm -rf {} + 2>/dev/null && ' +
   "find . -path '*/.wrangler/*' ! -path '*/.wrangler/deploy*' -delete 2>/dev/null";
+
+type RunnerLogs = {
+  logs: { stdout: string | ReadableStream<Uint8Array> };
+};
+
+const stdoutText = async (result: RunnerLogs): Promise<string> =>
+  typeof result.logs.stdout === "string"
+    ? result.logs.stdout
+    : await new Response(result.logs.stdout).text();
+
+const releaseRecordJson = (stdout: string, sha: string): string => {
+  const match = stdout.match(
+    /CLOUDFLARE_CI_RELEASE_RECORD_BEGIN\s*([\s\S]*?)\s*CLOUDFLARE_CI_RELEASE_RECORD_END/
+  );
+  if (!match?.[1]) {
+    throw new Error("release-record output did not contain marked JSON");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(match[1]);
+  } catch (error) {
+    throw new Error(
+      `release-record output was not valid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("release-record JSON must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  const recordSha = record.sha ?? record.commitSha ?? record.commit;
+  if (recordSha !== undefined && recordSha !== sha) {
+    throw new Error(`release-record SHA ${String(recordSha)} does not match ${sha}`);
+  }
+  return JSON.stringify(record);
+};
 
 export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
   protected async pipeline(
@@ -291,6 +329,54 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       return;
     }
 
+    // Main-only promotion gate. The branch return above makes it impossible
+    // for a PR/preview event to deploy sandbox or production.
+    if (config.preDeployCommand) {
+      await buildResult.runner({
+        name: "sandbox-deploy",
+        command: bound(
+          `${npmrcCommand} && ${relinkCommand} && ${config.preDeployCommand}`,
+          DEPLOY_COMMAND_TIMEOUT_MS
+        ),
+        secrets: ["NPM_TOKEN", ...config.preDeploySecrets],
+        persist: false,
+        cloudflareCredentials: {
+          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+        },
+        env: {
+          ...baseEnv,
+          CI_PUBLIC_URL: this.env.CI_PUBLIC_URL ?? "",
+          CI_RUN_URL: this.env.CI_PUBLIC_URL ?? "",
+          CI_REPO: String(repo),
+          CI_SHA: String(_event.payload.sha),
+        },
+        config: {
+          timeout: DEPLOY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+        },
+      });
+    }
+    if (config.preDeployVerifyCommand) {
+      await ci.runner({
+        name: "sandbox-verify",
+        sandbox: "SANDBOX_LITE",
+        persist: false,
+        command: bound(
+          config.preDeployVerifyCommand,
+          VERIFY_COMMAND_TIMEOUT_MS
+        ),
+        secrets: config.preDeployVerifySecrets,
+        cloudflareCredentials: {
+          accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+        },
+        env: baseEnv,
+        config: {
+          timeout: VERIFY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: VERIFY_COMMAND_TIMEOUT_MS,
+        },
+      });
+    }
+
     if (config.migrateCommand) {
       // Non-D1 migrations (PlanetScale etc.) run on the build snapshot —
       // the migrate tool resolves from node_modules. Migrate-only repos
@@ -467,13 +553,6 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         `PCT=100 PROMOTE && echo "CI_PROMOTE_FULL=1" || exit 1; ` +
         `else exit 1; fi; fi`;
 
-      const stdoutText = async (result: {
-        logs: { stdout: string | ReadableStream<Uint8Array> };
-      }) =>
-        typeof result.logs.stdout === "string"
-          ? result.logs.stdout
-          : await new Response(result.logs.stdout).text();
-
       const deployStep = (name: string, command: string) =>
         buildResult.runner({
           name,
@@ -592,6 +671,34 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
       }
     }
 
+    if (config.postDeployCommand) {
+      try {
+        await ci.runner({
+          name: "post-deploy-smoke",
+          sandbox: "SANDBOX_LITE",
+          persist: false,
+          command: bound(config.postDeployCommand, VERIFY_COMMAND_TIMEOUT_MS),
+          secrets: config.postDeploySecrets,
+          cloudflareCredentials: {
+            accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
+          },
+          env: baseEnv,
+          config: {
+            timeout: VERIFY_STEP_TIMEOUT_MS,
+            commandTimeoutMs: VERIFY_COMMAND_TIMEOUT_MS,
+          },
+        });
+      } catch (smokeError) {
+        console.error("[cloudflare-ci] post-deploy smoke failed", smokeError);
+        await capturePostHog(this.env, "ci.post_deploy_smoke.failed", {
+          repo: String(repo),
+          branch: String(branch),
+          sha: String(_event.payload.sha),
+          error: smokeError instanceof Error ? smokeError.message : String(smokeError),
+        });
+      }
+    }
+
     // VTX-585: post-rollout error watch — the repo's own probe (error-rate
     // check, SLO query) polls for watchSec; a breach rolls prod back.
     if (config.watchCommand && config.rollbackCommand) {
@@ -622,6 +729,111 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
         throw watchError;
       }
     }
+
+    if (config.releaseRecordCommand) {
+      const releaseRecord = await buildResult.runner({
+        name: "release-record",
+        command: bound(
+          `${npmrcCommand} && ${relinkCommand} && ${config.releaseRecordCommand}`,
+          DEPLOY_COMMAND_TIMEOUT_MS
+        ),
+        secrets: ["NPM_TOKEN", ...config.releaseRecordSecrets],
+        persist: false,
+        env: {
+          ...baseEnv,
+          CI_PUBLIC_URL: this.env.CI_PUBLIC_URL ?? "",
+          CI_RUN_URL: this.env.CI_PUBLIC_URL ?? "",
+          CI_REPO: String(repo),
+          CI_SHA: String(_event.payload.sha),
+        },
+        config: {
+          timeout: DEPLOY_STEP_TIMEOUT_MS,
+          commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+        },
+      });
+      const record = releaseRecordJson(
+        await stdoutText(releaseRecord as RunnerLogs),
+        String(_event.payload.sha)
+      );
+      await this.env.BACKUP_BUCKET.put(
+        `release-records/${String(repo)}/${String(_event.payload.sha)}.json`,
+        record,
+        { httpMetadata: { contentType: "application/json" } }
+      );
+    }
+
+    for (const publication of config.publishCommands) {
+      try {
+        const requiredSecrets = [...new Set(publication.secrets)];
+        let publicationEnv: Record<string, string> = {
+          ...baseEnv,
+          CI_RUN_URL: this.env.CI_PUBLIC_URL ?? "",
+          GITHUB_REF: "refs/heads/main",
+        };
+        if (publication.name === "publish-go-sdk") {
+          const goToken = await step.do("mint-vortex-go-token", async () => {
+            try {
+              if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_PRIVATE_KEY) {
+                throw new Error("GitHub App credentials are not bound");
+              }
+              return await getInstallationToken(
+                this.env.GITHUB_APP_ID,
+                this.env.GITHUB_APP_PRIVATE_KEY,
+                "VortexNYC/vortex-go",
+                {
+                  installationId: 182801553,
+                  repositories: ["vortex-go"],
+                  permissions: { contents: "write" },
+                }
+              );
+            } catch (error) {
+              console.error(
+                "[cloudflare-ci] skipping Go SDK publication; GitHub App token mint failed",
+                error
+              );
+              return null;
+            }
+          });
+          if (!goToken) continue;
+          publicationEnv = { ...publicationEnv, GITHUB_TOKEN: goToken };
+        }
+        const secretGuard = requiredSecrets
+          .map(
+            (secret) =>
+              `[ -n "\${${secret}:-}" ] || { echo "WARNING: skipping ${publication.name}; ${secret} is unbound" >&2; exit 0; }`
+          )
+          .join(" && ");
+        const publishBody =
+          `${npmrcCommand} && ${relinkCommand} && ${publication.command}`;
+        const idempotentPublish =
+          `OUT=$(${publishBody} 2>&1); RC=$?; ` +
+          `printf '%s\\n' "$OUT"; ` +
+          `if [ $RC -ne 0 ] && printf '%s\\n' "$OUT" | ` +
+          `grep -Eqi 'already exists|cannot publish over|previously published|file already exists'; then ` +
+          `echo "WARNING: ${publication.name} already published; skipping"; ` +
+          `else exit $RC; fi`;
+        await buildResult.runner({
+          name: publication.name,
+          command: bound(
+            `${secretGuard ? `${secretGuard} && ` : ""}${idempotentPublish}`,
+            DEPLOY_COMMAND_TIMEOUT_MS
+          ),
+          secrets: ["NPM_TOKEN", ...requiredSecrets],
+          persist: false,
+          env: publicationEnv,
+          config: {
+            timeout: DEPLOY_STEP_TIMEOUT_MS,
+            commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
+          },
+        });
+      } catch (publicationError) {
+        console.error(
+          `[cloudflare-ci] ${publication.name} failed; deploy remains successful`,
+          publicationError
+        );
+      }
+    }
+
     await withScheduler("dedupe-complete", async (stub) => {
       await stub.completeClaim(String(repo), branchKey, _event.instanceId);
       return null;

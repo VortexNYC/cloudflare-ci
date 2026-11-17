@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { CI } from "../src/ci.ts";
+import { getInstallationToken } from "../src/checks.ts";
 import { CiScheduler } from "../src/scheduler.ts";
+import { getRepoConfig } from "../src/repos.ts";
 import { makeStorage, DO_DEATH } from "./fakes.ts";
 
 type SchedulerMethod = "admit" | "release" | "getClaim" | "claim" | "completeClaim";
@@ -93,6 +96,9 @@ function makeEnv() {
       get: () => stub,
     },
     CLOUDFLARE_ACCOUNT_ID: "account",
+    BACKUP_BUCKET: {
+      put: async () => {},
+    },
   };
   return {
     env,
@@ -108,30 +114,52 @@ function makeEnv() {
 }
 
 /** Fake CiContext: runner() records the step order and returns a chainable result. */
-function makeCi() {
+function makeCi(options: {
+  failNames?: string[];
+  releaseRecordSha?: string;
+} = {}) {
   const ran: string[] = [];
+  const commands: string[] = [];
+  const failNames = new Set(options.failNames ?? []);
   const makeResult = (): unknown => ({
-    runner: (next: { name: string }) => {
+    logs: {
+      stdout: options.releaseRecordSha
+        ? `CLOUDFLARE_CI_RELEASE_RECORD_BEGIN\n{"sha":"${options.releaseRecordSha}"}\nCLOUDFLARE_CI_RELEASE_RECORD_END`
+        : "",
+    },
+    runner: async (next: { name: string; command?: string }) => {
       ran.push(next.name);
-      return Promise.resolve(makeResult());
+      if (next.command) commands.push(next.command);
+      if (failNames.has(next.name)) throw new Error(`${next.name} failed`);
+      return makeResult();
     },
   });
   return {
     ran,
-    runner: (options: { name: string }) => {
-      ran.push(options.name);
-      return Promise.resolve(makeResult());
+    commands,
+    runner: async (runnerOptions: { name: string; command?: string }) => {
+      ran.push(runnerOptions.name);
+      if (runnerOptions.command) commands.push(runnerOptions.command);
+      if (failNames.has(runnerOptions.name)) {
+        throw new Error(`${runnerOptions.name} failed`);
+      }
+      return makeResult();
     },
   };
 }
 
-function makeEvent(branch: string, sha: string, instanceId = "inst-1") {
+function makeEvent(
+  branch: string,
+  sha: string,
+  instanceId = "inst-1",
+  repo = "seal"
+) {
   return {
     payload: {
       provider: "cloudflare-artifacts",
       providerData: { namespace: "vortex" },
       owner: "vortex",
-      repo: "seal",
+      repo,
       sha,
       ref: `refs/heads/${branch}`,
       branch,
@@ -227,6 +255,137 @@ test("branch run ships a preview after a teardown on the dedupe check", async ()
   assert.deepEqual(ci.ran, ["deps", "build", "preview"]);
   assert.equal(
     (await schedulerDO.getClaim("seal", "cap-polish"))?.status,
+    "completed"
+  );
+});
+
+test("Vortex PR/preview runs never reach promotion, release, or publication", async () => {
+  const { env } = makeEnv();
+  const { step } = makeStep();
+  const ci = makeCi();
+
+  await runPipeline(
+    env,
+    step,
+    ci,
+    makeEvent("feature/safe", "0672c005", "inst-1", "vortex")
+  );
+
+  assert.deepEqual(ci.ran, ["deps", "build", "preview"]);
+  assert.equal(ci.ran.includes("sandbox-deploy"), false);
+  assert.equal(ci.ran.includes("release-record"), false);
+  assert.equal(ci.ran.some((name) => name.startsWith("publish-")), false);
+});
+
+test("Vortex main promotes sandbox, migrates, deploys, verifies, records, and publishes in order", async () => {
+  const { env } = makeEnv();
+  const { step } = makeStep();
+  const ci = makeCi({ releaseRecordSha: "7b0148ab" });
+
+  await runPipeline(
+    env,
+    step,
+    ci,
+    makeEvent("main", "7b0148ab", "inst-1", "vortex")
+  );
+
+  assert.deepEqual(ci.ran, [
+    "deps",
+    "build",
+    "sandbox-deploy",
+    "sandbox-verify",
+    "migrate",
+    "deploy",
+    "verify",
+    "post-deploy-smoke",
+    "release-record",
+    "publish-typescript-sdk",
+    "publish-python-sdk",
+  ]);
+});
+
+test("Go publication has no long-lived secret binding and skips without App credentials", async () => {
+  const { env } = makeEnv();
+  const { step } = makeStep();
+  const ci = makeCi({ releaseRecordSha: "7b0148ab" });
+
+  await runPipeline(
+    env,
+    step,
+    ci,
+    makeEvent("main", "7b0148ab", "inst-1", "vortex")
+  );
+
+  const goPublication = getRepoConfig("vortex")?.publishCommands.find(
+    (publication) => publication.name === "publish-go-sdk"
+  );
+  assert.deepEqual(goPublication?.secrets, []);
+  assert.equal(ci.ran.includes("publish-go-sdk"), false);
+});
+
+test("Go publication token request is repository-scoped and contents-write only", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  });
+  const requests: Array<{ url: string; body: string }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    requests.push({
+      url: String(input),
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    return new Response(JSON.stringify({ token: "short-lived-token" }), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    assert.equal(
+      await getInstallationToken(
+        "123",
+        privateKey,
+        "VortexNYC/vortex-go",
+        {
+          installationId: 182801553,
+          repositories: ["vortex-go"],
+          permissions: { contents: "write" },
+        }
+      ),
+      "short-lived-token"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(
+    requests[0]?.url,
+    "https://api.github.com/app/installations/182801553/access_tokens"
+  );
+  assert.deepEqual(JSON.parse(requests[0]?.body ?? ""), {
+    repositories: ["vortex-go"],
+    permissions: { contents: "write" },
+  });
+});
+
+test("publication failure does not roll back and still completes the claim", async () => {
+  const { env, schedulerDO } = makeEnv();
+  const { step } = makeStep();
+  const ci = makeCi({
+    releaseRecordSha: "7b0148ab",
+    failNames: ["publish-python-sdk"],
+  });
+
+  await runPipeline(
+    env,
+    step,
+    ci,
+    makeEvent("main", "7b0148ab", "inst-1", "vortex")
+  );
+
+  assert.equal(ci.ran.includes("rollback"), false);
+  assert.equal(
+    (await schedulerDO.getClaim("vortex", "main"))?.status,
     "completed"
   );
 });

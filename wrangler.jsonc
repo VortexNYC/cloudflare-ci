@@ -155,6 +155,7 @@
     }
   ],
   "vars": {
+    "CI_PUBLIC_URL": "https://cloudflare-ci.vortex-nyc.workers.dev",
     "BACKUP_BUCKET_NAME": "cloudflare-ci-backups",
     // Containers fetch restore archives over HTTP from this worker instead of
     // streaming through the DO isolate (which OOMs on large snapshots).
