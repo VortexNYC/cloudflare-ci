@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { CI } from "../src/ci.ts";
+import { getInstallationToken } from "../src/checks.ts";
 import { CiScheduler } from "../src/scheduler.ts";
+import { getRepoConfig } from "../src/repos.ts";
 import { makeStorage, DO_DEATH } from "./fakes.ts";
 
 type SchedulerMethod = "admit" | "release" | "getClaim" | "claim" | "completeClaim";
@@ -298,11 +301,10 @@ test("Vortex main promotes sandbox, migrates, deploys, verifies, records, and pu
     "release-record",
     "publish-typescript-sdk",
     "publish-python-sdk",
-    "publish-go-sdk",
   ]);
 });
 
-test("publication steps guard unbound secrets with warnings", async () => {
+test("Go publication has no long-lived secret binding and skips without App credentials", async () => {
   const { env } = makeEnv();
   const { step } = makeStep();
   const ci = makeCi({ releaseRecordSha: "7b0148ab" });
@@ -314,14 +316,56 @@ test("publication steps guard unbound secrets with warnings", async () => {
     makeEvent("main", "7b0148ab", "inst-1", "vortex")
   );
 
-  assert.equal(
-    ci.commands.some((command) => command.includes("PYPI_TOKEN is unbound")),
-    true
+  const goPublication = getRepoConfig("vortex")?.publishCommands.find(
+    (publication) => publication.name === "publish-go-sdk"
   );
+  assert.deepEqual(goPublication?.secrets, []);
+  assert.equal(ci.ran.includes("publish-go-sdk"), false);
+});
+
+test("Go publication token request is repository-scoped and contents-write only", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  });
+  const requests: Array<{ url: string; body: string }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    requests.push({
+      url: String(input),
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    return new Response(JSON.stringify({ token: "short-lived-token" }), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    assert.equal(
+      await getInstallationToken(
+        "123",
+        privateKey,
+        "VortexNYC/vortex-go",
+        {
+          installationId: 182801553,
+          repositories: ["vortex-go"],
+          permissions: { contents: "write" },
+        }
+      ),
+      "short-lived-token"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
   assert.equal(
-    ci.commands.some((command) => command.includes("GO_SDK_PUSH_TOKEN is unbound")),
-    true
+    requests[0]?.url,
+    "https://api.github.com/app/installations/182801553/access_tokens"
   );
+  assert.deepEqual(JSON.parse(requests[0]?.body ?? ""), {
+    repositories: ["vortex-go"],
+    permissions: { contents: "write" },
+  });
 });
 
 test("publication failure does not roll back and still completes the claim", async () => {

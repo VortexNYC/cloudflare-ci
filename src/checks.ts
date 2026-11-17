@@ -379,7 +379,12 @@ export async function getCommitSha(
 export async function getInstallationToken(
   appId: string,
   privateKeyPem: string,
-  repo: string
+  repo: string,
+  options: {
+    installationId?: number;
+    repositories?: string[];
+    permissions?: Record<string, "read" | "write" | "maintain" | "admin">;
+  } = {}
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = btoa(JSON.stringify({ alg: "RS256", typ: "JWT" }));
@@ -409,21 +414,21 @@ export async function getInstallationToken(
     String.fromCharCode(...new Uint8Array(signature))
   )}`;
 
-  const installation = (await githubApi(
-    jwt,
-    "GET",
-    `/repos/${repo}/installation`
-  )) as Json;
-  const installationId = installation.id;
-  if (typeof installationId !== "number") {
-    throw new Error(`no installation on ${repo}`);
-  }
+  const installationId = options.installationId ?? (
+    (await githubApi(jwt, "GET", `/repos/${repo}/installation`)) as Json
+  ).id;
+  if (typeof installationId !== "number") throw new Error(`no installation on ${repo}`);
 
   const token = (await githubApi(
     jwt,
     "POST",
     `/app/installations/${installationId}/access_tokens`,
-    { permissions: { checks: "write", contents: "read", pull_requests: "read" } }
+    {
+      ...(options.repositories ? { repositories: options.repositories } : {}),
+      permissions:
+        options.permissions ??
+        { checks: "write", contents: "read", pull_requests: "read" },
+    }
   )) as Json;
   const value = str(token.token);
   if (!value) throw new Error("installation token mint gave no token");

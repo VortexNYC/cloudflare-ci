@@ -467,8 +467,12 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
       },
       {
         name: "publish-go-sdk",
-        command: "pnpm run ci:publish-go-sdk",
-        secrets: ["GO_SDK_PUSH_TOKEN"],
+        // The Workflow injects a short-lived GitHub App token as
+        // GITHUB_TOKEN only for this step. The script's existing variable
+        // name is a compatibility alias, not a Worker secret binding.
+        command:
+          'GO_SDK_PUSH_TOKEN="$GITHUB_TOKEN" pnpm run ci:publish-go-sdk',
+        secrets: [],
       },
     ],
     checksInstallCommand:

@@ -8,6 +8,7 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { Bindings } from "./env";
 import { getRepoConfig } from "./repos";
 import { capturePostHog } from "./posthog";
+import { getInstallationToken } from "./checks";
 
 const MINUTE = 60 * 1000;
 
@@ -764,6 +765,36 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
     for (const publication of config.publishCommands) {
       try {
         const requiredSecrets = [...new Set(publication.secrets)];
+        let publicationEnv: Record<string, string> = {
+          ...baseEnv,
+          CI_RUN_URL: this.env.CI_PUBLIC_URL ?? "",
+          GITHUB_REF: "refs/heads/main",
+        };
+        if (publication.name === "publish-go-sdk") {
+          const goToken = await step.do("mint-vortex-go-token", async () => {
+            if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_PRIVATE_KEY) {
+              throw new Error("GitHub App credentials are not bound");
+            }
+            return getInstallationToken(
+              this.env.GITHUB_APP_ID,
+              this.env.GITHUB_APP_PRIVATE_KEY,
+              "VortexNYC/vortex-go",
+              {
+                installationId: 182801553,
+                repositories: ["vortex-go"],
+                permissions: { contents: "write" },
+              }
+            );
+          }).catch((error) => {
+            console.error(
+              "[cloudflare-ci] skipping Go SDK publication; GitHub App token mint failed",
+              error
+            );
+            return null;
+          });
+          if (!goToken) continue;
+          publicationEnv = { ...publicationEnv, GITHUB_TOKEN: goToken };
+        }
         const secretGuard = requiredSecrets
           .map(
             (secret) =>
@@ -787,11 +818,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
           ),
           secrets: ["NPM_TOKEN", ...requiredSecrets],
           persist: false,
-          env: {
-            ...baseEnv,
-            CI_RUN_URL: this.env.CI_PUBLIC_URL ?? "",
-            GITHUB_REF: "refs/heads/main",
-          },
+          env: publicationEnv,
           config: {
             timeout: DEPLOY_STEP_TIMEOUT_MS,
             commandTimeoutMs: DEPLOY_COMMAND_TIMEOUT_MS,
