@@ -243,19 +243,35 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
     const sandboxId = `checks-${repo.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${sha.slice(0, 10)}${sandboxScope}`;
     // Reuse existing runs on refire — a refired webhook must not mint a
     // duplicate context per check name.
+    const appId = Number(this.env.GITHUB_APP_ID);
     const runIds = await step.do("create-check-runs", async () => {
       const ids: Record<string, number> = {};
       // Scheduled + dispatch lanes are log+alert only — never mint check-runs on main.
       if (logOnly) return ids;
       for (const c of checks) {
-        ids[c.name] = await getOrCreateCheckRun(token, repo, sha, c.name);
+        // One bad check-run create/PATCH (e.g. a foreign-app run we may
+        // not reuse, or a token without checks:write) must not kill the
+        // Workflow — the other checks still run and report.
+        try {
+          ids[c.name] = await getOrCreateCheckRun(
+            token,
+            repo,
+            sha,
+            c.name,
+            Number.isFinite(appId) ? appId : undefined
+          );
+        } catch (err) {
+          console.error(`[checks] check-run for ${repo} ${c.name}: ${String(err)}`);
+        }
       }
       return ids;
     });
 
     for (const c of forkSkipped) {
+      const runId = runIds[c.name];
+      if (runId === undefined) continue;
       await step.do(`skip-fork-${c.name}`, () =>
-        completeCheckRun(token, repo, runIds[c.name]!, {
+        completeCheckRun(token, repo, runId, {
           conclusion: "neutral",
           title: `${c.name} skipped`,
           summary:
@@ -860,9 +876,13 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
 
       for (const r of results) {
         if (logOnly) continue;
+        // No check-run was opened for this name (its create/PATCH
+        // failed) — the check still ran; nothing to report against.
+        const runId = runIds[r.name];
+        if (runId === undefined) continue;
         await step.do(`report-${r.name}`, () => {
           if (r.superseded) {
-            return completeCheckRun(token, repo, runIds[r.name]!, {
+            return completeCheckRun(token, repo, runId, {
               conclusion: "cancelled",
               title: `${r.name} superseded`,
               summary:
@@ -872,7 +892,7 @@ export class ChecksWorkflow extends WorkflowEntrypoint<Bindings, ChecksParams> {
             });
           }
           const errored = r.error !== undefined;
-          return completeCheckRun(token, repo, runIds[r.name]!, {
+          return completeCheckRun(token, repo, runId, {
             conclusion: errored || !r.ok ? "failure" : "success",
             title: errored
               ? r.error!.split(":")[0]

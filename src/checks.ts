@@ -241,25 +241,42 @@ export async function createCheckRun(
 }
 
 /** Reuse the newest check run for (sha, name) — reopened in_progress — or
- *  create one. A refired webhook must not mint a duplicate context. */
+ *  create one. A refired webhook must not mint a duplicate context.
+ *  Only a run minted by our own App may be reused: a same-named run from
+ *  another app (e.g. a leftover GitHub Actions workflow) rejects PATCH
+ *  with "check run can only be modified by the GitHub App that created
+ *  it", so it gets a fresh run of ours instead of a 403 that kills the
+ *  Workflow. `appId` is GITHUB_APP_ID; when it's unknown the PATCH 403
+ *  fallback below still covers the foreign run. */
 export async function getOrCreateCheckRun(
   token: string,
   repo: string,
   sha: string,
-  name: string
+  name: string,
+  appId?: number
 ): Promise<number> {
   const list = (await githubApi(
     token,
     "GET",
     `/repos/${repo}/commits/${sha}/check-runs?check_name=${encodeURIComponent(name)}&filter=latest&per_page=1`
-  )) as { check_runs?: Array<{ id?: number }> };
-  const existing = list.check_runs?.[0]?.id;
-  if (typeof existing === "number") {
-    await githubApi(token, "PATCH", `/repos/${repo}/check-runs/${existing}`, {
-      status: "in_progress",
-      started_at: new Date().toISOString(),
-    });
-    return existing;
+  )) as { check_runs?: Array<{ id?: number; app?: { id?: number } }> };
+  const existing = list.check_runs?.[0];
+  const existingId = existing?.id;
+  const reusable =
+    typeof existingId === "number" &&
+    (appId === undefined || existing?.app?.id === appId);
+  if (reusable) {
+    try {
+      await githubApi(token, "PATCH", `/repos/${repo}/check-runs/${existingId}`, {
+        status: "in_progress",
+        started_at: new Date().toISOString(),
+      });
+      return existingId;
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes("failed: 403"))) {
+        throw err;
+      }
+    }
   }
   return createCheckRun(token, repo, sha, name);
 }
