@@ -455,7 +455,10 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
         timeoutMs: 40 * 60 * 1000,
         env: { FINIX_SMOKE_ENV: "sandbox" },
         secrets: [
-          "CLOUDFLARE_API_TOKEN",
+          // CF_TOKEN is the Worker's deploy token — the command exports
+          // it as CLOUDFLARE_API_TOKEN for alchemy/wrangler, same as
+          // ci.ts does for its own deploy calls.
+          "CF_TOKEN",
           "CLOUDFLARE_ACCOUNT_ID",
           "CLOUDFLARE_CI_BASE_URL",
           "FINIX_SANDBOX_USERNAME",
@@ -474,10 +477,12 @@ node -e 'const [M,m,p]=process.versions.node.split(".").map(Number); process.exi
 export PATH="\$HOME/.local/bin:\$PATH"
 # Guard — fail closed when a required name is unbound on the Worker.
 missing=0
-for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_CI_BASE_URL FINIX_SANDBOX_USERNAME FINIX_SANDBOX_PASSWORD; do
+for name in CF_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_CI_BASE_URL FINIX_SANDBOX_USERNAME FINIX_SANDBOX_PASSWORD; do
   [ -z "\${!name:-}" ] && { echo "::error::\$name missing on the cloudflare-ci Worker"; missing=1; }
 done
 [ "\$missing" = 0 ] || exit 1
+# alchemy + wrangler authenticate via CLOUDFLARE_API_TOKEN.
+export CLOUDFLARE_API_TOKEN="\$CF_TOKEN"
 # PaymentsCi only — production and sandbox stay on deploy-worker.sh.
 vp exec alchemy deploy scripts/alchemy/run.ts --stage ci --no-input --yes --include PaymentsCi
 # Per-PR origin: a preview-alias version serves THIS checkout at
