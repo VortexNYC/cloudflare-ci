@@ -23,6 +23,10 @@ const checkSchema = z.object({
   // verifies the PR's head repo before any sandbox spawns and skips the
   // check entirely on a mismatch (same contract as the old GHA `if:` guard).
   sameRepoOnly: z.boolean().default(false),
+  // Draft PRs run only `fast` checks (format, lint, secret scan) — the
+  // rest report neutral and fire for real on ready_for_review (and on
+  // merge_group, which never carries a draft flag).
+  fast: z.boolean().default(false),
   // Scheduled ops lanes stay off the PR CHECKS pool so a daily regression
   // can't starve merge checks; webhook checks default to CHECKS.
   pool: z.enum(["CHECKS", "AUX"]).default("CHECKS"),
@@ -238,6 +242,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
         // Must stay `secretlint` — seal's branch protection still requires
         // the retired GHA job's context name.
         name: "secretlint",
+        fast: true,
         command: "pnpm run scan:secrets",
       },
       {
@@ -245,6 +250,7 @@ const repoConfigs: Record<string, z.input<typeof repoConfigSchema>> = {
         // format and the repo has 233 files of pre-existing drift — gate
         // narrowing is intentional until that drift gets a cleanup pass.
         name: "ci",
+        fast: true,
         command: "pnpm exec vp lint && pnpm run typecheck",
         timeoutMs: 15 * 60 * 1000,
       },
@@ -356,6 +362,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
         // name now says so. pile's required contexts list is empty, so the
         // rename doesn't wedge any PR.
         name: "secretlint",
+        fast: true,
         command: "pnpm scan:secrets",
       },
       {
@@ -514,6 +521,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
         // scan:secrets = vp exec trufflehog … — vp exec only resolves
         // node_modules/.bin; call the image binary directly, same args.
         name: "trufflehog",
+        fast: true,
         command:
           "trufflehog git file://. --results=verified --fail --no-update " +
           "--exclude-globs='node_modules/**,pnpm-lock.yaml'",
@@ -1107,6 +1115,8 @@ const baselineChecks: CheckEntry[] = [
   },
   {
     name: "gitleaks",
+    // Secret scan is fast-lane — drafts still get it.
+    fast: true,
     command:
       'CFG=""; [ -f .gitleaks.toml ] && CFG="--config .gitleaks.toml"; ' +
       'gitleaks git $CFG --redact --log-opts "refs/ci/base..HEAD" --verbose .',

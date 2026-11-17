@@ -108,6 +108,32 @@ test("parseCheckEvent: pull_request edited marks the target for rescoping", () =
   assert.equal(opened?.edited, undefined);
 });
 
+test("parseCheckEvent: draft flag rides PR events; ready_for_review clears it", () => {
+  const drafted = parseCheckEvent("pull_request", {
+    action: "synchronize",
+    repository: { full_name: "VortexNYC/pile" },
+    pull_request: {
+      number: 42,
+      draft: true,
+      head: { sha: "abc123", ref: "feat-x" },
+    },
+  });
+  assert.equal(drafted?.draft, true);
+
+  // Marking ready fires ready_for_review with draft=false — the target
+  // carries no draft flag so the full suite runs.
+  const ready = parseCheckEvent("pull_request", {
+    action: "ready_for_review",
+    repository: { full_name: "VortexNYC/pile" },
+    pull_request: {
+      number: 42,
+      draft: false,
+      head: { sha: "abc123", ref: "feat-x" },
+    },
+  });
+  assert.equal(ready?.draft, undefined);
+});
+
 test("parseCheckEvent: check_suite on a queue branch recovers the PR number", () => {
   const target = parseCheckEvent("check_suite", {
     action: "requested",

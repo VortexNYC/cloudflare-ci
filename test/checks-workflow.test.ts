@@ -28,11 +28,22 @@ type Harness = {
   destroyed: string[];
   admits: string[];
   releases: string[];
+  claimChecks: string[];
+  claimBox: { claim: { sha: string } | null };
   ghPatches: GhPatch[];
   completedAux: string[];
 };
 
-function makeHarness(opts: { headRepo?: string; secretInOutput?: string } = {}): Harness {
+function makeHarness(
+  opts: {
+    headRepo?: string;
+    secretInOutput?: string;
+    /** runCheck stays pending until the sandbox is destroyed. */
+    deferRunCheck?: boolean;
+    claim?: { sha: string } | null;
+    supersedePollMs?: string;
+  } = {}
+): Harness {
   const headRepo = opts.headRepo ?? "VortexNYC/vortex";
   const sandboxNames: string[] = [];
   const sandboxRuns: Array<{
@@ -44,13 +55,18 @@ function makeHarness(opts: { headRepo?: string; secretInOutput?: string } = {}):
   const destroyed: string[] = [];
   const admits: string[] = [];
   const releases: string[] = [];
+  const claimChecks: string[] = [];
+  const claimBox = { claim: opts.claim ?? null };
   const ghPatches: GhPatch[] = [];
   const completedAux: string[] = [];
+  const pendingRuns: Array<(r: unknown) => void> = [];
 
   const schedStub = {
     trackAuxWorkflow: async () => {},
-    claimCheck: async () => {},
-    getCheckClaim: async () => null,
+    claimCheck: async (_r: string, branch: string) => {
+      claimChecks.push(branch);
+    },
+    getCheckClaim: async () => claimBox.claim,
     admit: async (a: { name: string }) => {
       admits.push(a.name);
       return { ok: true };
@@ -68,6 +84,7 @@ function makeHarness(opts: { headRepo?: string; secretInOutput?: string } = {}):
     NPM_TOKEN: "npm-token",
     FINIX_SANDBOX_USERNAME: "finix-user",
     FINIX_SANDBOX_PASSWORD: "finix-pass",
+    CHECKS_SUPERSEDE_POLL_MS: opts.supersedePollMs,
     CI_SCHEDULER: {
       idFromName: () => "id-global",
       get: () => schedStub,
@@ -83,6 +100,11 @@ function makeHarness(opts: { headRepo?: string; secretInOutput?: string } = {}):
               script: o.script,
               cacheRepo: o.cacheRepo,
             });
+            if (opts.deferRunCheck) {
+              return await new Promise((resolve) =>
+                pendingRuns.push(() => resolve({ exitCode: 0, stdout: "", stderr: "" }))
+              );
+            }
             // Emit the same markers the real run script produces.
             const names = [...o.script.matchAll(/> \/tmp\/check-([A-Za-z0-9_-]+)\.out/g)].map(
               (m) => m[1]!
@@ -100,6 +122,7 @@ function makeHarness(opts: { headRepo?: string; secretInOutput?: string } = {}):
           },
           destroy: async () => {
             destroyed.push(name);
+            for (const resolve of pendingRuns.splice(0)) resolve();
           },
         };
       },
@@ -150,12 +173,16 @@ function makeHarness(opts: { headRepo?: string; secretInOutput?: string } = {}):
     destroyed,
     admits,
     releases,
+    claimChecks,
+    claimBox,
     ghPatches,
     completedAux,
   };
 }
 
-function prEvent(): WorkflowEvent<ChecksParams> {
+function prEvent(
+  overrides: Partial<ChecksParams> = {}
+): WorkflowEvent<ChecksParams> {
   return {
     payload: {
       repo: "VortexNYC/vortex",
@@ -163,6 +190,7 @@ function prEvent(): WorkflowEvent<ChecksParams> {
       prNumber: 1143,
       headRef: "hotfix/money-path-drain",
       baseRef: "main",
+      ...overrides,
     },
     instanceId: "wf-1",
     timestamp: new Date(),
@@ -261,4 +289,166 @@ test("secret values in check output never reach the GitHub check-run summary", a
   assert.ok(!summary.includes("finix-user"));
   assert.ok(!summary.includes("finix-pass"));
   assert.match(summary, /leak \*\*\* \*\*\*/);
+});
+
+const FAST_DRAFT = ["trufflehog", "gitleaks"];
+const DRAFT_SKIPPED = ["ci", "prc", "worker-money-paths-regression"];
+
+test("draft PR: fast checks run, the rest close neutral — never green", async () => {
+  const h = makeHarness();
+  const restore = globalThis.fetch;
+  try {
+    await new ChecksWorkflow({}, h.env).run(prEvent({ draft: true }), h.step);
+  } finally {
+    globalThis.fetch = restore;
+  }
+
+  const base = "checks-vortexnyc-vortex-abc1234567";
+  // The serial slot ran, carrying only the fast checks.
+  const serialRun = h.sandboxRuns.find((r) => r.name === `${base}-all`)!;
+  assert.ok(serialRun);
+  for (const name of FAST_DRAFT) {
+    assert.match(serialRun.script, new RegExp(`check-${name}\\.out`));
+  }
+  for (const name of DRAFT_SKIPPED) {
+    assert.ok(!new RegExp(`check-${name.replace(/-/g, "-")}\\.out`).test(serialRun.script));
+  }
+  // The isolated secret-bearing check never spawned a sandbox at all.
+  assert.ok(!h.sandboxNames.includes(`${base}-worker-money-paths-regression`));
+
+  // Every skipped check closed neutral — a skip must never read as green.
+  for (const name of DRAFT_SKIPPED) {
+    const patch = h.ghPatches.find((p) =>
+      p.body.output?.title?.includes(name) && p.body.output?.title?.includes("skipped")
+    );
+    assert.ok(patch, `no neutral patch for ${name}`);
+    assert.equal(patch.body.conclusion, "neutral");
+    assert.match(patch.body.output?.summary ?? "", /ready for review|merge queue/);
+  }
+  for (const name of FAST_DRAFT) {
+    const patch = h.ghPatches.find((p) =>
+      p.body.output?.title === `${name} passed`
+    );
+    assert.ok(patch, `no success patch for ${name}`);
+    assert.equal(patch.body.conclusion, "success");
+  }
+  assert.ok(h.completedAux.includes("checks"));
+});
+
+test("ready_for_review (draft unset): the full suite runs", async () => {
+  const h = makeHarness();
+  const restore = globalThis.fetch;
+  try {
+    await new ChecksWorkflow({}, h.env).run(prEvent(), h.step);
+  } finally {
+    globalThis.fetch = restore;
+  }
+
+  const base = "checks-vortexnyc-vortex-abc1234567";
+  const serialRun = h.sandboxRuns.find((r) => r.name === `${base}-all`)!;
+  for (const name of [...FAST_DRAFT, "ci", "prc"]) {
+    assert.match(serialRun.script, new RegExp(`check-${name}\\.out`));
+  }
+  assert.ok(h.sandboxNames.includes(`${base}-worker-money-paths-regression`));
+  assert.ok(!h.ghPatches.some((p) => p.body.output?.title?.includes("skipped (draft)")));
+});
+
+test("merge_group event: full suite runs and the supersede lane stays unarmed", async () => {
+  const h = makeHarness();
+  const restore = globalThis.fetch;
+  try {
+    await new ChecksWorkflow({}, h.env).run(
+      prEvent({
+        headRef: "refs/heads/gh-readonly-queue/main/pr-1143-abc1234567",
+        baseSha: "fff000aaa",
+      }),
+      h.step
+    );
+  } finally {
+    globalThis.fetch = restore;
+  }
+
+  const base = "checks-vortexnyc-vortex-abc1234567";
+  assert.ok(h.sandboxRuns.some((r) => r.name === `${base}-all`));
+  assert.ok(h.sandboxNames.includes(`${base}-worker-money-paths-regression`));
+  assert.equal(h.claimChecks.length, 0);
+});
+
+test("main ref: newest-wins claim is never armed, runs always finish", async () => {
+  const h = makeHarness({ claim: { sha: "999000other" } });
+  const restore = globalThis.fetch;
+  try {
+    // check_suite.rerequested shape — headRef main, no PR.
+    await new ChecksWorkflow({}, h.env).run(
+      prEvent({ headRef: "main", prNumber: undefined }),
+      h.step
+    );
+  } finally {
+    globalThis.fetch = restore;
+  }
+
+  assert.equal(h.claimChecks.length, 0);
+  // Even though the ledger holds a different sha, the run completed and
+  // reported success — main is never cancelled.
+  assert.ok(
+    h.ghPatches.some((p) => p.body.conclusion === "success")
+  );
+});
+
+test("queued check on a superseded sha: cancels, no sandbox burns", async () => {
+  const h = makeHarness({ claim: { sha: "999000newer" } });
+  const restore = globalThis.fetch;
+  try {
+    await new ChecksWorkflow({}, h.env).run(prEvent(), h.step);
+  } finally {
+    globalThis.fetch = restore;
+  }
+
+  assert.deepEqual(h.claimChecks, ["hotfix/money-path-drain"]);
+  assert.equal(h.sandboxRuns.length, 0);
+  const cancelled = h.ghPatches.filter((p) => p.body.conclusion === "cancelled");
+  assert.ok(cancelled.length >= 4);
+  for (const p of cancelled) {
+    assert.match(p.body.output?.title ?? "", /superseded/);
+  }
+  assert.ok(!h.ghPatches.some((p) => p.body.conclusion === "success"));
+  assert.ok(h.completedAux.includes("checks"));
+});
+
+test("in-flight run on a superseded sha: destroyed mid-run and reported cancelled", async () => {
+  const h = makeHarness({ deferRunCheck: true, supersedePollMs: "20" });
+  const restore = globalThis.fetch;
+  try {
+    const done = new ChecksWorkflow({}, h.env).run(prEvent(), h.step);
+    // Wait until the check containers are actually running.
+    for (let i = 0; i < 200 && h.sandboxRuns.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(h.sandboxRuns.length > 0, "runCheck never started");
+    // A newer push lands on the same PR ref.
+    h.claimBox.claim = { sha: "999000newer" };
+    await done;
+  } finally {
+    globalThis.fetch = restore;
+  }
+
+  const base = "checks-vortexnyc-vortex-abc1234567";
+  // The in-flight serial sandbox was destroyed — that is the cancellation.
+  assert.ok(h.destroyed.includes(`${base}-all`));
+  // The isolated check either was cancelled while still queued (no
+  // sandbox minted) or destroyed mid-run — both are correct; what it
+  // must never do is report green.
+  const isoSandbox = `${base}-worker-money-paths-regression`;
+  assert.ok(
+    !h.sandboxRuns.some((r) => r.name === isoSandbox) ||
+      h.destroyed.includes(isoSandbox)
+  );
+  // Every running check reports cancelled, never green.
+  const cancelled = h.ghPatches.filter((p) => p.body.conclusion === "cancelled");
+  assert.ok(cancelled.length >= 4);
+  for (const p of cancelled) {
+    assert.match(p.body.output?.title ?? "", /superseded/);
+  }
+  assert.ok(!h.ghPatches.some((p) => p.body.conclusion === "success"));
+  assert.ok(h.completedAux.includes("checks"));
 });
