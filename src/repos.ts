@@ -335,97 +335,6 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
     watchSec: 10,
     rollbackCommand: "pnpm exec wrangler rollback --name cloudflare-ci-drill",
   },
-
-  vortex: {
-    name: "vortex",
-    checksExecution: "serial",
-    installEnv: {
-      HOME: "/tmp",
-      CI: "true",
-      VP_GIT_HOOKS: "0",
-    },
-    // sdk:build + entrypoints (root `build`), then the apps whose deploys
-    // read dist/ — dashboard/landing/docs static bundles + cde's hosted pkg.
-    // Current sandbox images still have Node 22.23.2 until the Dockerfile
-    // rebuild rolls out. Astro 7.4 exits on that. Install 24.22.2 beside it.
-    buildCommand:
-      "node -e 'const [M,m,p]=process.versions.node.split(\".\").map(Number); process.exit(M>22||(M===22&&(m>23||(m===23&&p>=4)))?0:1)' || " +
-      "{ mkdir -p \"$HOME/.local\" && curl -fsSL \"https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/').tar.gz\" | tar -xz -C \"$HOME/.local\" --strip-components=1; } && " +
-      "export PATH=\"$HOME/.local/bin:$PATH\" && node -v && " +
-      "pnpm exec vp run build && " +
-      "pnpm exec vp run -F ./apps/dashboard build && " +
-      "pnpm exec vp run -F ./apps/landing build && " +
-      "pnpm exec vp run -F ./apps/docs build && " +
-      "pnpm exec vp run -F @vortex/hosted build",
-    // Automated PlanetScale migrations (replaces the manual `pscale role
-    // reset` + `db:migrate` runbook): the migrate step runs off the deps
-    // snapshot — the deploy below then skips re-migrating (SKIP_MIGRATE=1).
-    migrateCommand:
-      'DATABASE_URL="$VORTEX_MIGRATE_URL" pnpm --filter @vortexnyc/money-kernel db:migrate',
-    migrateSecrets: ["VORTEX_MIGRATE_URL"],
-    // Every worker in the monorepo ships on main — same all-apps model as
-    // seal. deploy-worker.sh gates on migrations; the pipeline's migrate
-    // step already ran them, so SKIP_MIGRATE=1 keeps ordering in CI.
-    deployCommand:
-      "SKIP_MIGRATE=1 bash scripts/deploy-worker.sh && " +
-      "(cd packages/global && pnpm exec vp exec wrangler deploy) && " +
-      "(cd apps/dashboard && pnpm exec vp exec wrangler deploy) && " +
-      "(cd apps/landing && pnpm exec vp exec wrangler deploy) && " +
-      "(cd apps/docs && pnpm exec vp exec wrangler deploy --config dist/server/wrangler.json) && " +
-      "(cd apps/element-cdn && pnpm exec vp exec wrangler deploy) && " +
-      "(cd apps/ops-relay && pnpm exec vp exec wrangler deploy) && " +
-      "(cd apps/anydoc-worker && pnpm exec vp exec wrangler deploy -e production) && " +
-      "(cd packages/cde-worker && pnpm exec vp exec wrangler deploy)",
-    previewCommand:
-      '(cd packages/worker && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
-      '(cd apps/dashboard && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
-      '(cd apps/landing && pnpm exec vp exec wrangler versions upload --preview-alias "$CI_PREVIEW_ALIAS") && ' +
-      '(cd apps/docs && pnpm exec vp exec wrangler versions upload --config dist/server/wrangler.json --preview-alias "$CI_PREVIEW_ALIAS")',
-    // api.vortex.nyc serves /health even during maintenance windows — a 200
-    // right after deploy proves the upload serves, not just uploads.
-    verifyCommand: "curl -fsS --max-time 15 https://api.vortex.nyc/health",
-    checksInstallCommand:
-      '{ cp .npmrc ~/.npmrc 2>/dev/null || printf "@vortexnyc:registry=https://npm.pkg.github.com\\n" > ~/.npmrc; } && ' +
-      'printf "//npm.pkg.github.com/:_authToken=%s\\n" "$NPM_TOKEN" >> ~/.npmrc && ' +
-      'service postgresql start && ' +
-      `su postgres -c "psql -c \\"ALTER USER postgres WITH PASSWORD 'postgres'\\"; createdb vortex_dev" || true; ` +
-      "pnpm install --frozen-lockfile --store-dir /tmp/.pnpm-store",
-    checks: [
-      {
-        // scan:secrets = vp exec trufflehog … — vp exec only resolves
-        // node_modules/.bin; call the image binary directly, same args.
-        name: "trufflehog",
-        command:
-          "trufflehog git file://. --results=verified --fail --no-update " +
-          "--exclude-globs='node_modules/**,pnpm-lock.yaml'",
-      },
-      {
-        // The GHA verify job: sdk:build + check + openapi:verify +
-        // contract:check + lint:hazards + oxlint plugin + landing.
-        // sdk:build must stay before check — the typecheck resolves
-        // @vortex-api/vortex types from the generated SDK.
-        // check = lint:effect (effect-tsgo oxlint) + vp check (Vite+ fmt/lint/typecheck).
-        // Cloudflare checks runner relaxes vm.overcommit_memory for oxc JS plugins.
-        name: "ci",
-        command:
-          // overcommit is relaxed platform-wide by the checks runner —
-          // see buildRunScript in checks-workflow.ts.
-          "pnpm exec vp run sdk:build && pnpm run check && " +
-          "pnpm exec vp run openapi:verify && pnpm exec vp run contract:check && " +
-          "pnpm exec vp run lint:hazards && pnpm exec vp run test:oxlint-plugin && " +
-          "pnpm exec vp run landing:typecheck && pnpm exec vp run landing:build && " +
-          "pnpm exec vp run -F ./apps/landing test",
-        timeoutMs: 20 * 60 * 1000,
-      },
-      {
-        // production-readiness.yml: MarinJursic prc scan — clones the pinned
-        // rev and builds with Go; image carries go1.27.
-        name: "prc",
-        command: "bash production-readiness/prc.sh",
-        timeoutMs: 15 * 60 * 1000,
-      },
-    ],
-  },
   veil: {
     name: "veil",
     installEnv: {
@@ -480,7 +389,7 @@ rolloutUploadCommand: "pnpm exec wrangler versions upload -e production",
   },
 };
 
-const repoNameSchema = z.enum(["seal", "pile", "veil", "vortex", "canary", "drill"]);
+const repoNameSchema = z.enum(["seal", "pile", "veil", "canary", "drill"]);
 
 // Platform baseline (VTX-580): gates every repo inherits regardless of its
 // own `checks` — merged by name so a repo entry overrides the baseline, and

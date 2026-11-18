@@ -339,6 +339,14 @@ async function handleGitHubWebhook(
   );
   if (!target) return Response.json({ ok: true, skipped: event });
 
+  // Only onboarded repos (src/repos.ts) may dispatch workflows — retired
+  // repos keep sending webhooks while the app stays installed, and the
+  // mirror path otherwise mirrors them to Artifacts with no config gate.
+  const config = getRepoConfig(target.repo.split("/")[1] ?? "");
+  if (!config) {
+    return Response.json({ ok: true, skipped: `repo not onboarded: ${target.repo}` });
+  }
+
   // push events mirror the branch to Artifacts — the fire that replaces
   // artifacts-sync.yml. The cf.artifacts.repo.pushed event carries the
   // pipeline downstream exactly as the GHA job did.
@@ -368,8 +376,7 @@ async function handleGitHubWebhook(
     return Response.json({ ok: true, id, mirrored: target.mirrorRef, created });
   }
 
-  const config = getRepoConfig(target.repo.split("/")[1] ?? "");
-  if (!config || config.checks.length === 0) {
+  if (config.checks.length === 0) {
     return Response.json({ ok: true, skipped: `no checks for ${target.repo}` });
   }
   const params = { ...target, checkNames: target.checkNames };
